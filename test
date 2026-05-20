@@ -1,1 +1,23 @@
 <property name="hibernate.default_batch_fetch_size" value="20"/>
+Le problème principal ne provient pas d’une requête SQL lente mais d’un très grand volume de requêtes JDBC générées par Hibernate (~54M requêtes), principalement lié à du lazy loading / phénomène de type N+1 queries pendant la génération XML.
+
+Le traitement actuel est unitaire via :
+
+produceInvoiceXmlInNewTransaction(invoiceId)
+
+Chaque invoice ouvre une nouvelle transaction (REQUIRES_NEW), recharge l’entité Invoice, puis navigue dans plusieurs relations Hibernate (payment, billingAccount, country, language, etc.), provoquant une forte répétition des accès DB.
+
+Constats Glowroot :
+	•	requête payment exécutée ~54M fois ;
+	•	temps moyen faible (~4.8 ms) ;
+	•	forte volumétrie de requêtes Hibernate ;
+	•	pression importante sur la DB et augmentation du temps batch.
+
+Une première optimisation a été mise en place via :
+
+Proposition :
+	•	conserver cette optimisation en PROD et suivre l’évolution des performances ;
+	•	si insuffisant, envisager une amélioration applicative plus structurante :
+	•	traitement bulk/batch ;
+	•	préchargement des invoices (findAllByIds + JOIN FETCH) ;
+	•	traitement par lots (~100 invoices) dans une seule transaction afin de réduire le lazy loading et les accès Hibernate répétitifs.
