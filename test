@@ -1,3 +1,1 @@
-J’ai besoin des droits d’accès à la BDD opencell_db en PROD pour un client lourd.
-
-J’aurais également besoin des droits sur le job Jenkins de préproduction : alpiqpro-preprod-pipeline.
+preprod-pipeline.
