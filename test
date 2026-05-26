@@ -1,2 +1,6 @@
-Hello, est-ce que quelqu’un pourrait lancer un déploiement en PREPROD PRO s’il vous plaît ?
-Je n’ai pas encore les accès au job Jenkins alpiqpro-preprod-pipeline
+Bonjour,
+
+Actuellement, mon compte dispose uniquement des droits en lecture seule sur les BDD.
+Pouvez-vous m’accorder les permissions en écriture sur les environnements recette, préprod, part et prod, s’il vous plaît ?
+
+Cordialement,
