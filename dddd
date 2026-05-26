@@ -1,0 +1,4 @@
+Get-ChildItem -Recurse -Filter *.java | Get-Content | Measure-Object -Line
+
+Get-ChildItem .\src -Recurse -Filter *.java | Get-Content | Measure-Object -Line
+
