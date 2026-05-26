@@ -1,4 +1,5 @@
-Get-ChildItem -Recurse -Filter *.java | Get-Content | Measure-Object -Line
+Bonjour,
 
-Get-ChildItem .\src -Recurse -Filter *.java | Get-Content | Measure-Object -Line
+Veuillez trouver ci-joint la documentation concernant le choix de SonarQube Developer Edition.
 
+Cordialement,
