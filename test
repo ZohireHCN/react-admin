@@ -1,6 +1,208 @@
-Bonjour,
+RAPPORT TECHNIQUE — MISE EN PLACE SONARQUBE
+	1.	CONTEXTE
 
-Actuellement, mon compte dispose uniquement des droits en lecture seule sur les BDD.
-Pouvez-vous m’accorder les permissions en écriture sur les environnements recette, préprod, part et prod, s’il vous plaît ?
+⸻
 
-Cordialement,
+Dans le cadre de l’amélioration de la qualité du code et du renforcement de la sécurité applicative, il est proposé de mettre en place une plateforme SonarQube pour :
+	•	3 projets Java
+	•	1 projet React
+	•	une équipe d’environ 20 développeurs
+
+L’objectif est de centraliser l’analyse de qualité du code, la détection des vulnérabilités et le suivi de la dette technique via une intégration CI/CD.
+
+⸻
+
+	2.	SOLUTION RETENUE
+
+⸻
+
+Produit :
+SonarQube Developer Edition (Self-Hosted)
+
+Cette édition a été choisie car elle offre :
+	•	l’analyse des branches et Pull Requests
+	•	les Quality Gates
+	•	l’analyse sécurité avancée
+	•	une bonne compatibilité Java / React
+	•	une évolutivité vers la version Enterprise
+
+⸻
+
+	3.	JUSTIFICATION DU CHOIX
+
+⸻
+
+La solution SonarQube Developer Edition est adaptée au contexte actuel de l’entreprise pour les raisons suivantes :
+	•	Taille d’équipe modérée (~20 développeurs)
+	•	Nombre limité de projets
+	•	Besoin d’intégration CI/CD
+	•	Analyse sécurité et qualité avancée
+	•	Coût raisonnable
+	•	Déploiement simple
+	•	Évolutivité future
+
+⸻
+
+	4.	FONCTIONNALITÉS PRINCIPALES
+
+⸻
+
+Analyse qualité :
+	•	Détection de bugs
+	•	Détection de code smells
+	•	Mesure de dette technique
+	•	Détection de duplication de code
+	•	Analyse de complexité
+
+Analyse sécurité :
+	•	Vulnérabilités
+	•	Security Hotspots
+	•	Contrôles OWASP
+
+CI/CD :
+	•	Analyse automatique des pipelines
+	•	Analyse Pull Requests / Merge Requests
+	•	Quality Gates bloquants
+
+Langages supportés :
+	•	Java
+	•	JavaScript
+	•	TypeScript
+	•	React
+
+⸻
+
+	5.	ARCHITECTURE CIBLE
+
+⸻
+
+Développeur
+↓
+GitLab / Jenkins / Azure DevOps
+↓
+Sonar Scanner
+↓
+SonarQube Server
+↓
+PostgreSQL
+
+⸻
+
+	6.	INFRASTRUCTURE RECOMMANDÉE
+
+⸻
+
+Serveur SonarQube :
+	•	OS : Ubuntu Server 22.04 LTS
+	•	CPU : 4 vCPU
+	•	RAM : 8 Go
+	•	Stockage : 100 Go SSD
+	•	Java : OpenJDK 21
+	•	HTTPS : Nginx Reverse Proxy
+
+Base de données PostgreSQL :
+	•	PostgreSQL 15 ou 16
+	•	CPU : 2 vCPU
+	•	RAM : 4 Go
+	•	Stockage : 50 Go SSD
+
+Pour un petit environnement, PostgreSQL peut être installé sur la même VM.
+
+⸻
+
+	7.	INTÉGRATION CI/CD
+
+⸻
+
+Solutions compatibles :
+	•	Jenkins
+	•	GitLab CI/CD
+	•	Azure DevOps
+	•	GitHub Actions
+
+Outils Java :
+	•	Maven
+	•	Gradle
+	•	JaCoCo
+
+Outils React :
+	•	npm
+	•	yarn
+	•	ESLint
+	•	SonarScanner CLI
+
+⸻
+
+	8.	SÉCURITÉ ET ACCÈS
+
+⸻
+
+Recommandations :
+	•	Authentification LDAP / Active Directory
+	•	HTTPS obligatoire
+	•	Sauvegarde PostgreSQL régulière
+	•	Gestion des rôles utilisateurs
+	•	Restriction des accès administrateurs
+
+⸻
+
+	9.	ESTIMATION DES COÛTS
+
+⸻
+
+Licence SonarQube Developer :
+~700 à 1500 € / an
+
+Infrastructure :
+~20 à 50 € / mois selon hébergement
+
+Maintenance :
+Faible
+
+⸻
+
+	10.	ÉVOLUTIVITÉ
+
+⸻
+
+La solution peut évoluer facilement vers SonarQube Enterprise sans modification majeure :
+	•	conservation de la même architecture
+	•	conservation des pipelines CI/CD
+	•	conservation de PostgreSQL
+
+Cette migration nécessite uniquement :
+	•	une mise à jour de licence
+	•	une montée de version éventuelle
+
+⸻
+
+	11.	RECOMMANDATION FINALE
+
+⸻
+
+La solution recommandée est :
+
+SonarQube Developer Edition Self-Hosted
+
+Cette solution représente le meilleur compromis entre :
+	•	coût
+	•	fonctionnalités
+	•	simplicité d’exploitation
+	•	sécurité
+	•	évolutivité
+
+Elle est parfaitement adaptée à une équipe de 20 développeurs travaillant sur des projets Java et React.
+
+⸻
+
+	12.	PLANNING ESTIMATIF
+
+⸻
+
+Installation VM : 0.5 jour
+Installation SonarQube : 0.5 jour
+Configuration PostgreSQL : 0.5 jour
+Intégration CI/CD : 1 jour
+Tests et validation : 0.5 jour
+
+Charge totale estimée :
