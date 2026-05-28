@@ -19,3 +19,20 @@ Objectifs :
 
 C’est une proposition ouverte à discussion 🙂
 N’hésitez pas à partager vos retours ou suggestions d’amélioration.
+
+
+Story Points (actuel)
+Estimation en heures (proposition)
+1 SP
+~1h dev + ~1h suivi chaîne / MEP
+2 SP
+~2h dev + ~1h suivi chaîne / MEP
+3 SP
+~3h dev + ~1h suivi chaîne / MEP
+5 SP
+~5h dev + ~1h suivi chaîne + ~2h doc/tests/refacto
+8 SP
+~8h dev + ~1h suivi chaîne + ~2h doc/tests/refacto
+13 SP
+À découper en plusieurs tâches si possible
+
