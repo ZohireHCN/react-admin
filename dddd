@@ -1,5 +1,9 @@
-Bonjour,
-
-Veuillez trouver ci-joint la documentation concernant le choix de SonarQube Developer Edition.
-
-Cordialement,
+SELECT 
+    bi.id AS invoice_id,
+    msi.code
+FROM billing_invoice bi
+JOIN billing_invoice_type t 
+    ON bi.invoice_type_id = t.id
+JOIN meveo_script_instance msi 
+    ON t.script_instance_id = msi.id
+WHERE bi.id IN (1, 2, 3, 4, 5);
