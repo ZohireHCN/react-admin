@@ -13,3 +13,21 @@ Après suppression de cette action et récupération uniquement des données ré
 Suite à cette analyse, l’ajout de hibernate.default_batch_fetch_size n’est finalement plus nécessaire pour ce cas précis, puisque le problème ne provenait pas d’un chargement lazy légitime mais d’un chargement complet d’une entité et de ses relations qui n’étaient pas utilisées par le traitement.
 
 Point d’attention pour les futures MR : dans les traitements batch volumétriques, éviter les appels de type refresh, refreshOrRetrieve ou initializeAndUnproxy sur des entités volumineuses lorsqu’une partie seulement des données est nécessaire, afin d’éviter le chargement inutile de graphes Hibernate et les effets de type N+1.
+
+
+
+Dans ce cas, il faut corriger les chiffres B2B.
+
+Si avant correction, le traitement de 2 600 factures B2B était toujours en cours après 1 heure et n’avait traité qu’environ 1 000 factures, alors on ne peut pas donner un temps final exact. On peut simplement indiquer que le temps de traitement était supérieur à 1 heure.
+
+Tableau mis à jour
+
+Flux	Volume	Avant	Après
+B2C	2 700 factures	6 min	4 min
+B2C	30 000 factures	1 h 50 min	52 min
+B2B	2 600 factures	> 1 h (1 000 factures traitées après 1 h)	48 s
+B2B	20 600 factures	N/A	9 min
+
+Commentaire
+
+Les tests réalisés après la correction du XML Job montrent une amélioration significative des performances. Sur les flux B2C, le temps de traitement a été réduit de 33 % à 53 %. Sur les flux B2B, l’amélioration est particulièrement marquante : avant correction, le traitement de 2 600 factures était toujours en cours après plus d’une heure et seulement 1 000 factures avaient été traitées. Après correction, le même traitement est exécuté en seulement 48 secondes. De plus, un volume de 20 600 factures est désormais traité en 9 minutes, démontrant une nette amélioration de la capacité de traitement et de la montée en charge du système.
