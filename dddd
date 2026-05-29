@@ -16,6 +16,31 @@ Point d’attention pour les futures MR : dans les traitements batch volumétriq
 
 
 
+Tu peux envoyer quelque chose comme ça sur Slack :
+
+🚀 Résultats des tests après correction du XML Job
+
+Nous avons comparé les performances avant et après la correction :
+
+B2C
+• 2 700 factures : 6 min ➜ 4 min (-33 %)
+• 30 000 factures : 1 h 50 ➜ 52 min (-53 %)
+
+B2B
+• 2 600 factures :
+	•	Avant : après plus d’1 heure de traitement, seulement ~1 000 factures avaient été générées (traitement toujours en cours).
+	•	Après : 2 600 factures générées en 48 secondes.
+• 20 600 factures : générées en 9 minutes.
+
+La correction a supprimé un important goulot d’étranglement sur le traitement XML, avec un gain particulièrement spectaculaire sur les flux B2B. Les résultats confirment également une bien meilleure montée en charge sur les gros volumes. 🎉
+
+Merci à tous pour les investigations et les corrections apportées !
+
+C’est assez professionnel tout en restant adapté à un message Slack d’équipe.
+
+
+
+
 Dans ce cas, il faut corriger les chiffres B2B.
 
 Si avant correction, le traitement de 2 600 factures B2B était toujours en cours après 1 heure et n’avait traité qu’environ 1 000 factures, alors on ne peut pas donner un temps final exact. On peut simplement indiquer que le temps de traitement était supérieur à 1 heure.
