@@ -1,9 +1,15 @@
+Voici une version plus précise et techniquement correcte :
+
 Analyse finalisée sur le job Custom_XML_Job.
 
-La cause principale des lenteurs venait de l’appel à refreshOrRetrieve() dans le traitement XML, notamment lors de l’anonymisation IBAN. Cet appel forçait Hibernate à recharger l’entité CustomerAccount complète et à initialiser une partie importante de son graphe d’objets, notamment les relations liées aux moyens de paiement / PaymentVentilation.
+L’investigation Glowroot a permis d’identifier que la principale source des lenteurs provenait de l’appel à refreshOrRetrieve() lors du traitement d’anonymisation IBAN.
 
-Dans un contexte batch multi-thread, cela provoquait un volume très important de requêtes Hibernate de type lazy loading / N+1.
+Cet appel forçait Hibernate à recharger l’entité CustomerAccount et à initialiser une partie de son graphe d’objets, déclenchant notamment le chargement de la collection PaymentVentilation. Cette collection n’est pourtant pas utilisée dans le cadre de la génération XML.
 
-Après correction, en évitant ce rechargement complet et en récupérant uniquement la donnée nécessaire, le temps de traitement en PREPROD est passé d’environ 1h30 pour 1700 factures à moins d’une minute.
+Le volume important de requêtes observé dans Glowroot provenait donc essentiellement de ce chargement Hibernate non nécessaire.
 
-Point d’attention pour les prochaines MR : éviter, dans les traitements batch, les appels qui forcent Hibernate à charger des entités complètes ou des graphes d’objets volumineux (refresh, refreshOrRetrieve, initializeAndUnproxy, etc.). Privilégier des accès ciblés aux données nécessaires afin de limiter les requêtes SQL générées et les effets N+1.
+Après suppression de cette action et récupération uniquement des données réellement nécessaires au traitement, le temps d’exécution observé en PREPROD est passé d’environ 1h30 pour 1700 factures à moins d’une minute.
+
+Suite à cette analyse, l’ajout de hibernate.default_batch_fetch_size n’est finalement plus nécessaire pour ce cas précis, puisque le problème ne provenait pas d’un chargement lazy légitime mais d’un chargement complet d’une entité et de ses relations qui n’étaient pas utilisées par le traitement.
+
+Point d’attention pour les futures MR : dans les traitements batch volumétriques, éviter les appels de type refresh, refreshOrRetrieve ou initializeAndUnproxy sur des entités volumineuses lorsqu’une partie seulement des données est nécessaire, afin d’éviter le chargement inutile de graphes Hibernate et les effets de type N+1.
