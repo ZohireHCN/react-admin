@@ -1,58 +1,83 @@
-Voici une version plus précise et techniquement correcte :
+D’accord : tu veux lancer ton plugin comme ça :
 
-Analyse finalisée sur le job Custom_XML_Job.
+mvn test:buildprod -DprodVersion=26.06.5
 
-L’investigation Glowroot a permis d’identifier que la principale source des lenteurs provenait de l’appel à refreshOrRetrieve() lors du traitement d’anonymisation IBAN.
+⚠️ Pas avec -v, car mvn -v est déjà réservé par Maven pour afficher la version de Maven.
 
-Cet appel forçait Hibernate à recharger l’entité CustomerAccount et à initialiser une partie de son graphe d’objets, déclenchant notamment le chargement de la collection PaymentVentilation. Cette collection n’est pourtant pas utilisée dans le cadre de la génération XML.
+Commande correcte
 
-Le volume important de requêtes observé dans Glowroot provenait donc essentiellement de ce chargement Hibernate non nécessaire.
+mvn test:buildprod -DprodVersion=26.06.5
 
-Après suppression de cette action et récupération uniquement des données réellement nécessaires au traitement, le temps d’exécution observé en PREPROD est passé d’environ 1h30 pour 1700 factures à moins d’une minute.
+Plugin Maven
 
-Suite à cette analyse, l’ajout de hibernate.default_batch_fetch_size n’est finalement plus nécessaire pour ce cas précis, puisque le problème ne provenait pas d’un chargement lazy légitime mais d’un chargement complet d’une entité et de ses relations qui n’étaient pas utilisées par le traitement.
+pom.xml du plugin
 
-Point d’attention pour les futures MR : dans les traitements batch volumétriques, éviter les appels de type refresh, refreshOrRetrieve ou initializeAndUnproxy sur des entités volumineuses lorsqu’une partie seulement des données est nécessaire, afin d’éviter le chargement inutile de graphes Hibernate et les effets de type N+1.
+<project>
+    <modelVersion>4.0.0</modelVersion>
 
+    <groupId>com.masociete.maven</groupId>
+    <artifactId>test-maven-plugin</artifactId>
+    <version>1.0.0</version>
+    <packaging>maven-plugin</packaging>
 
+    <dependencies>
+        <dependency>
+            <groupId>org.apache.maven</groupId>
+            <artifactId>maven-plugin-api</artifactId>
+            <version>3.9.9</version>
+        </dependency>
 
-Tu peux envoyer quelque chose comme ça sur Slack :
+        <dependency>
+            <groupId>org.apache.maven.plugin-tools</groupId>
+            <artifactId>maven-plugin-annotations</artifactId>
+            <version>3.15.1</version>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+</project>
 
-🚀 Résultats des tests après correction du XML Job
+Mojo buildprod
 
-Nous avons comparé les performances avant et après la correction :
+package com.masociete.maven;
 
-B2C
-• 2 700 factures : 6 min ➜ 4 min (-33 %)
-• 30 000 factures : 1 h 50 ➜ 52 min (-53 %)
+import org.apache.maven.plugin.AbstractMojo;
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugins.annotations.Mojo;
+import org.apache.maven.plugins.annotations.Parameter;
 
-B2B
-• 2 600 factures :
-	•	Avant : après plus d’1 heure de traitement, seulement ~1 000 factures avaient été générées (traitement toujours en cours).
-	•	Après : 2 600 factures générées en 48 secondes.
-• 20 600 factures : générées en 9 minutes.
+@Mojo(name = "buildprod")
+public class BuildProdMojo extends AbstractMojo {
 
-La correction a supprimé un important goulot d’étranglement sur le traitement XML, avec un gain particulièrement spectaculaire sur les flux B2B. Les résultats confirment également une bien meilleure montée en charge sur les gros volumes. 🎉
+    @Parameter(property = "prodVersion", required = true)
+    private String prodVersion;
 
-Merci à tous pour les investigations et les corrections apportées !
+    @Override
+    public void execute() throws MojoExecutionException {
+        getLog().info("Build PROD avec la version : " + prodVersion);
 
-C’est assez professionnel tout en restant adapté à un message Slack d’équipe.
+        // Ici ta logique métier
+        // exemple : générer un fichier, modifier une config, tagger une release, etc.
+    }
+}
 
+Utilisation dans un projet
 
+Dans le pom.xml du projet qui utilise le plugin :
 
+<build>
+    <plugins>
+        <plugin>
+            <groupId>com.masociete.maven</groupId>
+            <artifactId>test-maven-plugin</artifactId>
+            <version>1.0.0</version>
+        </plugin>
+    </plugins>
+</build>
 
-Dans ce cas, il faut corriger les chiffres B2B.
+Puis tu lances :
 
-Si avant correction, le traitement de 2 600 factures B2B était toujours en cours après 1 heure et n’avait traité qu’environ 1 000 factures, alors on ne peut pas donner un temps final exact. On peut simplement indiquer que le temps de traitement était supérieur à 1 heure.
+mvn test:buildprod -DprodVersion=26.06.5
 
-Tableau mis à jour
+Résultat attendu :
 
-Flux	Volume	Avant	Après
-B2C	2 700 factures	6 min	4 min
-B2C	30 000 factures	1 h 50 min	52 min
-B2B	2 600 factures	> 1 h (1 000 factures traitées après 1 h)	48 s
-B2B	20 600 factures	N/A	9 min
-
-Commentaire
-
-Les tests réalisés après la correction du XML Job montrent une amélioration significative des performances. Sur les flux B2C, le temps de traitement a été réduit de 33 % à 53 %. Sur les flux B2B, l’amélioration est particulièrement marquante : avant correction, le traitement de 2 600 factures était toujours en cours après plus d’une heure et seulement 1 000 factures avaient été traitées. Après correction, le même traitement est exécuté en seulement 48 secondes. De plus, un volume de 20 600 factures est désormais traité en 9 minutes, démontrant une nette amélioration de la capacité de traitement et de la montée en charge du système.
+Build PROD avec la version : 26.06.5
