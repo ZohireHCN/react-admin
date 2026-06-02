@@ -1,4 +1,4 @@
-Voici l’implémentation complète de BuildProdMojo.java :
+Voici l’implémentation complète :
 
 package com.masociete.maven;
 
@@ -31,28 +31,47 @@ public class BuildProdMojo extends AbstractMojo {
         try {
             validateVersion(prodVersion);
 
-            Path base = basedir.toPath();
-            Path src = base.resolve("src");
+            Path src = basedir.toPath().resolve("src");
             Path release = src.resolve("release");
 
             if (withGeneric) {
-                generateReleaseFiles(
+                generateOneFolder(
                         src.resolve("generic"),
                         release.resolve("generic"),
                         "generic"
                 );
             }
 
-            generateReleaseFiles(
-                    release.resolve(prodVersion),
-                    release.resolve(prodVersion),
-                    prodVersion
-            );
+            Path versionRoot = release.resolve(prodVersion);
+
+            if (!Files.exists(versionRoot)) {
+                throw new MojoExecutionException("Dossier version introuvable : " + versionRoot);
+            }
+
+            try (Stream<Path> folders = Files.list(versionRoot)) {
+                folders
+                        .filter(Files::isDirectory)
+                        .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                        .forEach(folder -> {
+                            try {
+                                String folderName = folder.getFileName().toString();
+
+                                generateOneFolder(
+                                        folder,
+                                        folder,
+                                        prodVersion + "-" + folderName
+                                );
+
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        });
+            }
 
             getLog().info("Génération terminée avec succès.");
 
         } catch (Exception e) {
-            throw new MojoExecutionException("Erreur pendant la génération des fichiers release", e);
+            throw new MojoExecutionException("Erreur pendant la génération release", e);
         }
     }
 
@@ -63,17 +82,13 @@ public class BuildProdMojo extends AbstractMojo {
 
         if (!version.matches("\\d{2}\\.\\d{2}\\.\\d+")) {
             throw new MojoExecutionException(
-                    "Version invalide : " + version + ". Exemple attendu : 26.06.5"
+                    "Version invalide : " + version + ". Exemple attendu : 26.06.0"
             );
         }
     }
 
-    private void generateReleaseFiles(Path inputRoot, Path outputRoot, String releaseName)
-            throws IOException, MojoExecutionException {
-
-        if (!Files.exists(inputRoot)) {
-            throw new MojoExecutionException("Dossier introuvable : " + inputRoot);
-        }
+    private void generateOneFolder(Path inputRoot, Path outputRoot, String releaseName)
+            throws IOException {
 
         Files.createDirectories(outputRoot);
 
@@ -105,7 +120,7 @@ public class BuildProdMojo extends AbstractMojo {
                              CommentType commentType) throws IOException {
 
         if (!Files.exists(inputFolder)) {
-            getLog().warn("Dossier ignoré car introuvable : " + inputFolder);
+            getLog().warn("Dossier ignoré : " + inputFolder);
             return;
         }
 
@@ -135,7 +150,7 @@ public class BuildProdMojo extends AbstractMojo {
             String fileName = path.getFileName().toString();
 
             result.append(System.lineSeparator());
-            appendFileHeader(result, fileName, commentType);
+            appendHeader(result, fileName, commentType);
             result.append(System.lineSeparator());
 
             result.append(Files.readString(path, StandardCharsets.UTF_8));
@@ -148,8 +163,8 @@ public class BuildProdMojo extends AbstractMojo {
         }
     }
 
-    private void appendFileHeader(StringBuilder result, String fileName, CommentType commentType) {
-        if (commentType == CommentType.SQL) {
+    private void appendHeader(StringBuilder result, String fileName, CommentType type) {
+        if (type == CommentType.SQL) {
             result.append("-- =============================================").append(System.lineSeparator());
             result.append("-- FILE : ").append(fileName).append(System.lineSeparator());
             result.append("-- =============================================").append(System.lineSeparator());
@@ -168,14 +183,6 @@ public class BuildProdMojo extends AbstractMojo {
 
 Commande :
 
-mvn test:buildprod -DprodVersion=26.06.5 -DwithGeneric=true
+mvn test:buildprod -DprodVersion=26.06.0 -DwithGeneric=true
 
-Résultat :
-
-src/release/generic/release-generic-data.sql
-src/release/generic/release-generic-struct.sql
-src/release/generic/release-generic-postman.json
-
-src/release/26.06.5/release-26.06.5-data.sql
-src/release/26.06.5/release-26.06.5-struct.sql
-src/release/26.06.5/release-26.06.5-postman.json
+Ça génère pour generic, 1-Both, 2-B2C, 3-B2B, etc.
