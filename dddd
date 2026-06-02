@@ -1,203 +1,185 @@
-Oui. Il faut remplacer la sortie src/release/... par target/release/....
+Oui, et c’est même beaucoup plus propre que de concaténer plusieurs JSON Postman.
 
-Remplace cette ligne dans execute() :
+Le principe :
+	•	Tu lis tous les fichiers .json du dossier postman
+	•	Tu les désérialises
+	•	Tu récupères leur tableau item
+	•	Tu fusionnes tous les item dans une seule collection Postman
+	•	Tu génères un unique :
 
-Path release = src.resolve("release");
+release-26.06.0-1-Both-postman.json
+
+qui contient :
+
+{
+  "info": {
+    "name": "Release 26.06.0 - 1-Both",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      ...
+    },
+    {
+      ...
+    },
+    {
+      ...
+    }
+  ]
+}
+
+
+⸻
+
+Dépendance Jackson
+
+Dans ton plugin :
+
+<dependency>
+    <groupId>com.fasterxml.jackson.core</groupId>
+    <artifactId>jackson-databind</artifactId>
+    <version>2.18.2</version>
+</dependency>
+
+
+⸻
+
+Méthode dédiée
+
+private void mergePostmanCollections(Path inputFolder,
+                                     Path outputFile,
+                                     String collectionName) throws IOException {
+
+    if (!Files.exists(inputFolder)) {
+        getLog().warn("Dossier ignoré : " + inputFolder);
+        return;
+    }
+
+    ObjectMapper mapper = new ObjectMapper();
+
+    ObjectNode root = mapper.createObjectNode();
+
+    ObjectNode info = mapper.createObjectNode();
+    info.put("name", collectionName);
+    info.put(
+            "schema",
+            "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    );
+
+    root.set("info", info);
+
+    ArrayNode mergedItems = mapper.createArrayNode();
+
+    try (Stream<Path> files = Files.list(inputFolder)) {
+
+        files.filter(Files::isRegularFile)
+                .filter(path -> path.toString().endsWith(".json"))
+                .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                .forEach(path -> {
+
+                    try {
+
+                        JsonNode json = mapper.readTree(path.toFile());
+
+                        if (json.has("item")) {
+
+                            ArrayNode items = (ArrayNode) json.get("item");
+
+                            items.forEach(mergedItems::add);
+
+                            getLog().info(
+                                    "Collection ajoutée : "
+                                            + path.getFileName()
+                                            + " ("
+                                            + items.size()
+                                            + " item(s))"
+                            );
+                        }
+
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+    }
+
+    root.set("item", mergedItems);
+
+    mapper.writerWithDefaultPrettyPrinter()
+            .writeValue(outputFile.toFile(), root);
+
+    getLog().info(
+            "Collection Postman fusionnée créée : "
+                    + outputFile
+                    + " (" + mergedItems.size() + " requêtes)"
+    );
+}
+
+
+⸻
+
+Dans generateOneFolder
+
+Remplace :
+
+mergeFolder(
+        inputRoot.resolve("postman"),
+        outputRoot.resolve("release-" + releaseName + "-postman.json"),
+        ".json",
+        CommentType.JSON
+);
 
 par :
 
-Path sourceRelease = src.resolve("release");
-Path targetRelease = basedir.toPath().resolve("target").resolve("release");
+mergePostmanCollections(
+        inputRoot.resolve("postman"),
+        outputRoot.resolve("release-" + releaseName + "-postman.json"),
+        "Release " + releaseName
+);
 
-Et utilise cette version complète :
 
-package com.masociete.maven;
+⸻
 
-import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
+Exemple :
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.Comparator;
-import java.util.stream.Stream;
+Si tu as :
 
-@Mojo(name = "buildprod")
-public class BuildProdMojo extends AbstractMojo {
+postman/
+ ├─ export.json
+ ├─ import.json
+ └─ cancel.json
 
-    @Parameter(property = "prodVersion", required = true)
-    private String prodVersion;
+avec :
 
-    @Parameter(property = "withGeneric", defaultValue = "false")
-    private boolean withGeneric;
-
-    @Parameter(defaultValue = "${project.basedir}", readonly = true)
-    private File basedir;
-
-    @Override
-    public void execute() throws MojoExecutionException {
-        try {
-            validateVersion(prodVersion);
-
-            Path src = basedir.toPath().resolve("src");
-            Path sourceRelease = src.resolve("release");
-            Path targetRelease = basedir.toPath().resolve("target").resolve("release");
-
-            if (withGeneric) {
-                generateOneFolder(
-                        src.resolve("generic"),
-                        targetRelease.resolve("generic"),
-                        "generic"
-                );
-            }
-
-            Path versionRoot = sourceRelease.resolve(prodVersion);
-
-            if (!Files.exists(versionRoot)) {
-                throw new MojoExecutionException("Dossier version introuvable : " + versionRoot);
-            }
-
-            try (Stream<Path> folders = Files.list(versionRoot)) {
-                folders
-                        .filter(Files::isDirectory)
-                        .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                        .forEach(folder -> {
-                            try {
-                                String folderName = folder.getFileName().toString();
-
-                                generateOneFolder(
-                                        folder,
-                                        targetRelease
-                                                .resolve(prodVersion)
-                                                .resolve(folderName),
-                                        prodVersion + "-" + folderName
-                                );
-
-                            } catch (Exception e) {
-                                throw new RuntimeException(e);
-                            }
-                        });
-            }
-
-            getLog().info("Génération terminée dans : " + targetRelease);
-
-        } catch (Exception e) {
-            throw new MojoExecutionException("Erreur pendant la génération release", e);
-        }
-    }
-
-    private void validateVersion(String version) throws MojoExecutionException {
-        if (version == null || version.trim().isEmpty()) {
-            throw new MojoExecutionException("Le paramètre prodVersion est obligatoire.");
-        }
-
-        if (!version.matches("\\d{2}\\.\\d{2}\\.\\d+")) {
-            throw new MojoExecutionException(
-                    "Version invalide : " + version + ". Exemple attendu : 26.06.0"
-            );
-        }
-    }
-
-    private void generateOneFolder(Path inputRoot, Path outputRoot, String releaseName)
-            throws IOException {
-
-        Files.createDirectories(outputRoot);
-
-        mergeFolder(
-                inputRoot.resolve("sql-data"),
-                outputRoot.resolve("release-" + releaseName + "-data.sql"),
-                ".sql",
-                CommentType.SQL
-        );
-
-        mergeFolder(
-                inputRoot.resolve("sql-struct"),
-                outputRoot.resolve("release-" + releaseName + "-struct.sql"),
-                ".sql",
-                CommentType.SQL
-        );
-
-        mergeFolder(
-                inputRoot.resolve("postman"),
-                outputRoot.resolve("release-" + releaseName + "-postman.json"),
-                ".json",
-                CommentType.JSON
-        );
-    }
-
-    private void mergeFolder(Path inputFolder,
-                             Path outputFile,
-                             String extension,
-                             CommentType commentType) throws IOException {
-
-        if (!Files.exists(inputFolder)) {
-            getLog().warn("Dossier ignoré : " + inputFolder);
-            return;
-        }
-
-        StringBuilder result = new StringBuilder();
-
-        try (Stream<Path> files = Files.list(inputFolder)) {
-            files
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().toLowerCase().endsWith(extension))
-                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                    .forEach(path -> appendFile(result, path, commentType));
-        }
-
-        Files.writeString(
-                outputFile,
-                result.toString(),
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
-
-        getLog().info("Fichier créé : " + outputFile);
-    }
-
-    private void appendFile(StringBuilder result, Path path, CommentType commentType) {
-        try {
-            String fileName = path.getFileName().toString();
-
-            result.append(System.lineSeparator());
-            appendHeader(result, fileName, commentType);
-            result.append(System.lineSeparator());
-
-            result.append(Files.readString(path, StandardCharsets.UTF_8));
-
-            result.append(System.lineSeparator());
-            result.append(System.lineSeparator());
-
-        } catch (IOException e) {
-            throw new RuntimeException("Erreur lecture fichier : " + path, e);
-        }
-    }
-
-    private void appendHeader(StringBuilder result, String fileName, CommentType type) {
-        if (type == CommentType.SQL) {
-            result.append("-- =============================================").append(System.lineSeparator());
-            result.append("-- FILE : ").append(fileName).append(System.lineSeparator());
-            result.append("-- =============================================").append(System.lineSeparator());
-        } else {
-            result.append("// =============================================").append(System.lineSeparator());
-            result.append("// FILE : ").append(fileName).append(System.lineSeparator());
-            result.append("// =============================================").append(System.lineSeparator());
-        }
-    }
-
-    private enum CommentType {
-        SQL,
-        JSON
-    }
+{
+  "item": [
+    { "name": "Export" }
+  ]
 }
 
-Résultat :
+{
+  "item": [
+    { "name": "Import" }
+  ]
+}
 
-target/release/generic/...
-target/release/26.06.0/1-Both/...
-target/release/26.06.0/2-B2C/...
-target/release/26.06.0/3-B2B/...
+{
+  "item": [
+    { "name": "Cancel" }
+  ]
+}
+
+Le fichier généré contiendra :
+
+{
+  "info": {
+    "name": "Release 26.06.0-1-Both"
+  },
+  "item": [
+    { "name": "Export" },
+    { "name": "Import" },
+    { "name": "Cancel" }
+  ]
+}
+
+C’est le format attendu par Postman et tu pourras importer une seule collection contenant toutes les requêtes de la release.
