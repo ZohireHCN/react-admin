@@ -1,42 +1,4 @@
-D’accord : tu veux lancer ton plugin comme ça :
-
-mvn test:buildprod -DprodVersion=26.06.5
-
-⚠️ Pas avec -v, car mvn -v est déjà réservé par Maven pour afficher la version de Maven.
-
-Commande correcte
-
-mvn test:buildprod -DprodVersion=26.06.5
-
-Plugin Maven
-
-pom.xml du plugin
-
-<project>
-    <modelVersion>4.0.0</modelVersion>
-
-    <groupId>com.masociete.maven</groupId>
-    <artifactId>test-maven-plugin</artifactId>
-    <version>1.0.0</version>
-    <packaging>maven-plugin</packaging>
-
-    <dependencies>
-        <dependency>
-            <groupId>org.apache.maven</groupId>
-            <artifactId>maven-plugin-api</artifactId>
-            <version>3.9.9</version>
-        </dependency>
-
-        <dependency>
-            <groupId>org.apache.maven.plugin-tools</groupId>
-            <artifactId>maven-plugin-annotations</artifactId>
-            <version>3.15.1</version>
-            <scope>provided</scope>
-        </dependency>
-    </dependencies>
-</project>
-
-Mojo buildprod
+Voici le BuildProdMojo complet :
 
 package com.masociete.maven;
 
@@ -45,39 +7,145 @@ import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugins.annotations.Mojo;
 import org.apache.maven.plugins.annotations.Parameter;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.Comparator;
+import java.util.stream.Stream;
+
 @Mojo(name = "buildprod")
 public class BuildProdMojo extends AbstractMojo {
 
     @Parameter(property = "prodVersion", required = true)
     private String prodVersion;
 
+    @Parameter(property = "withGeneric", defaultValue = "false")
+    private boolean withGeneric;
+
+    @Parameter(defaultValue = "${project.basedir}", readonly = true)
+    private File basedir;
+
     @Override
     public void execute() throws MojoExecutionException {
-        getLog().info("Build PROD avec la version : " + prodVersion);
+        try {
+            Path base = basedir.toPath();
+            Path src = base.resolve("src");
+            Path release = src.resolve("release");
 
-        // Ici ta logique métier
-        // exemple : générer un fichier, modifier une config, tagger une release, etc.
+            validateVersion(prodVersion);
+
+            if (withGeneric) {
+                generateReleaseFiles(
+                        src.resolve("generic"),
+                        release.resolve("generic"),
+                        "generic"
+                );
+            }
+
+            generateReleaseFiles(
+                    release.resolve(prodVersion),
+                    release.resolve(prodVersion),
+                    prodVersion
+            );
+
+            getLog().info("Génération terminée avec succès.");
+
+        } catch (Exception e) {
+            throw new MojoExecutionException("Erreur pendant la génération des fichiers release", e);
+        }
+    }
+
+    private void validateVersion(String version) throws MojoExecutionException {
+        if (version == null || version.trim().isEmpty()) {
+            throw new MojoExecutionException("Le paramètre prodVersion est obligatoire.");
+        }
+
+        if (!version.matches("\\d{2}\\.\\d{2}\\.\\d+")) {
+            throw new MojoExecutionException(
+                    "Version invalide : " + version + ". Exemple attendu : 26.06.5"
+            );
+        }
+    }
+
+    private void generateReleaseFiles(Path inputRoot, Path outputRoot, String releaseName)
+            throws IOException, MojoExecutionException {
+
+        if (!Files.exists(inputRoot)) {
+            throw new MojoExecutionException("Dossier introuvable : " + inputRoot);
+        }
+
+        Files.createDirectories(outputRoot);
+
+        mergeSqlFolder(
+                inputRoot.resolve("sql-data"),
+                outputRoot.resolve("release-" + releaseName + "-data.sql")
+        );
+
+        mergeSqlFolder(
+                inputRoot.resolve("sql-struct"),
+                outputRoot.resolve("release-" + releaseName + "-struct.sql")
+        );
+    }
+
+    private void mergeSqlFolder(Path inputFolder, Path outputFile)
+            throws IOException {
+
+        if (!Files.exists(inputFolder)) {
+            getLog().warn("Dossier ignoré car introuvable : " + inputFolder);
+            return;
+        }
+
+        StringBuilder result = new StringBuilder();
+
+        try (Stream<Path> files = Files.list(inputFolder)) {
+            files
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.toString().toLowerCase().endsWith(".sql"))
+                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                    .forEach(path -> appendSqlFile(result, path));
+        }
+
+        Files.writeString(
+                outputFile,
+                result.toString(),
+                StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING
+        );
+
+        getLog().info("Fichier créé : " + outputFile);
+    }
+
+    private void appendSqlFile(StringBuilder result, Path path) {
+        try {
+            String fileName = path.getFileName().toString();
+
+            result.append(System.lineSeparator());
+            result.append("-- =============================================").append(System.lineSeparator());
+            result.append("-- FILE : ").append(fileName).append(System.lineSeparator());
+            result.append("-- =============================================").append(System.lineSeparator());
+            result.append(System.lineSeparator());
+
+            result.append(Files.readString(path, StandardCharsets.UTF_8));
+
+            result.append(System.lineSeparator());
+            result.append(System.lineSeparator());
+
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur lecture fichier SQL : " + path, e);
+        }
     }
 }
 
-Utilisation dans un projet
+Commande :
 
-Dans le pom.xml du projet qui utilise le plugin :
+mvn test:buildprod -DprodVersion=26.06.5 -DwithGeneric=true
 
-<build>
-    <plugins>
-        <plugin>
-            <groupId>com.masociete.maven</groupId>
-            <artifactId>test-maven-plugin</artifactId>
-            <version>1.0.0</version>
-        </plugin>
-    </plugins>
-</build>
+Résultat :
 
-Puis tu lances :
+src/release/generic/release-generic-data.sql
+src/release/generic/release-generic-struct.sql
 
-mvn test:buildprod -DprodVersion=26.06.5
-
-Résultat attendu :
-
-Build PROD avec la version : 26.06.5
+src/release/26.06.5/release-26.06.5-data.sql
+src/release/26.06.5/release-26.06.5-struct.sql
