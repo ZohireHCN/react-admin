@@ -1,4 +1,15 @@
-Voici l’implémentation complète :
+Oui. Il faut remplacer la sortie src/release/... par target/release/....
+
+Remplace cette ligne dans execute() :
+
+Path release = src.resolve("release");
+
+par :
+
+Path sourceRelease = src.resolve("release");
+Path targetRelease = basedir.toPath().resolve("target").resolve("release");
+
+Et utilise cette version complète :
 
 package com.masociete.maven;
 
@@ -32,17 +43,18 @@ public class BuildProdMojo extends AbstractMojo {
             validateVersion(prodVersion);
 
             Path src = basedir.toPath().resolve("src");
-            Path release = src.resolve("release");
+            Path sourceRelease = src.resolve("release");
+            Path targetRelease = basedir.toPath().resolve("target").resolve("release");
 
             if (withGeneric) {
                 generateOneFolder(
                         src.resolve("generic"),
-                        release.resolve("generic"),
+                        targetRelease.resolve("generic"),
                         "generic"
                 );
             }
 
-            Path versionRoot = release.resolve(prodVersion);
+            Path versionRoot = sourceRelease.resolve(prodVersion);
 
             if (!Files.exists(versionRoot)) {
                 throw new MojoExecutionException("Dossier version introuvable : " + versionRoot);
@@ -58,7 +70,9 @@ public class BuildProdMojo extends AbstractMojo {
 
                                 generateOneFolder(
                                         folder,
-                                        folder,
+                                        targetRelease
+                                                .resolve(prodVersion)
+                                                .resolve(folderName),
                                         prodVersion + "-" + folderName
                                 );
 
@@ -68,7 +82,7 @@ public class BuildProdMojo extends AbstractMojo {
                         });
             }
 
-            getLog().info("Génération terminée avec succès.");
+            getLog().info("Génération terminée dans : " + targetRelease);
 
         } catch (Exception e) {
             throw new MojoExecutionException("Erreur pendant la génération release", e);
@@ -181,8 +195,9 @@ public class BuildProdMojo extends AbstractMojo {
     }
 }
 
-Commande :
+Résultat :
 
-mvn test:buildprod -DprodVersion=26.06.0 -DwithGeneric=true
-
-Ça génère pour generic, 1-Both, 2-B2C, 3-B2B, etc.
+target/release/generic/...
+target/release/26.06.0/1-Both/...
+target/release/26.06.0/2-B2C/...
+target/release/26.06.0/3-B2B/...
