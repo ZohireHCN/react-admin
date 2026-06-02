@@ -1,185 +1,59 @@
-Oui, et c’est même beaucoup plus propre que de concaténer plusieurs JSON Postman.
+Pour la fusion Postman avec Jackson, ajoute ces imports en haut de ta classe :
 
-Le principe :
-	•	Tu lis tous les fichiers .json du dossier postman
-	•	Tu les désérialises
-	•	Tu récupères leur tableau item
-	•	Tu fusionnes tous les item dans une seule collection Postman
-	•	Tu génères un unique :
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
-release-26.06.0-1-Both-postman.json
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.Comparator;
+import java.util.stream.Stream;
 
-qui contient :
+import org.apache.maven.plugin.AbstractMojo;
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugins.annotations.Mojo;
+import org.apache.maven.plugins.annotations.Parameter;
 
-{
-  "info": {
-    "name": "Release 26.06.0 - 1-Both",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-  },
-  "item": [
-    {
-      ...
-    },
-    {
-      ...
-    },
-    {
-      ...
-    }
-  ]
-}
+Et dans ton pom.xml :
 
+<dependencies>
 
-⸻
+    <dependency>
+        <groupId>org.apache.maven</groupId>
+        <artifactId>maven-plugin-api</artifactId>
+        <version>3.9.9</version>
+    </dependency>
 
-Dépendance Jackson
+    <dependency>
+        <groupId>org.apache.maven.plugin-tools</groupId>
+        <artifactId>maven-plugin-annotations</artifactId>
+        <version>3.13.1</version>
+        <scope>provided</scope>
+    </dependency>
 
-Dans ton plugin :
+    <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>2.18.2</version>
+    </dependency>
 
-<dependency>
-    <groupId>com.fasterxml.jackson.core</groupId>
-    <artifactId>jackson-databind</artifactId>
-    <version>2.18.2</version>
-</dependency>
+</dependencies>
 
+Petite amélioration utile : lors de la fusion, tu peux ajouter le nom du fichier source dans chaque requête Postman.
 
-⸻
+Par exemple, pour un fichier :
 
-Méthode dédiée
+COL-18810_RFP_EXPORT_AJUSTEMENT_FUU.json
 
-private void mergePostmanCollections(Path inputFolder,
-                                     Path outputFile,
-                                     String collectionName) throws IOException {
-
-    if (!Files.exists(inputFolder)) {
-        getLog().warn("Dossier ignoré : " + inputFolder);
-        return;
-    }
-
-    ObjectMapper mapper = new ObjectMapper();
-
-    ObjectNode root = mapper.createObjectNode();
-
-    ObjectNode info = mapper.createObjectNode();
-    info.put("name", collectionName);
-    info.put(
-            "schema",
-            "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-    );
-
-    root.set("info", info);
-
-    ArrayNode mergedItems = mapper.createArrayNode();
-
-    try (Stream<Path> files = Files.list(inputFolder)) {
-
-        files.filter(Files::isRegularFile)
-                .filter(path -> path.toString().endsWith(".json"))
-                .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                .forEach(path -> {
-
-                    try {
-
-                        JsonNode json = mapper.readTree(path.toFile());
-
-                        if (json.has("item")) {
-
-                            ArrayNode items = (ArrayNode) json.get("item");
-
-                            items.forEach(mergedItems::add);
-
-                            getLog().info(
-                                    "Collection ajoutée : "
-                                            + path.getFileName()
-                                            + " ("
-                                            + items.size()
-                                            + " item(s))"
-                            );
-                        }
-
-                    } catch (Exception e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-    }
-
-    root.set("item", mergedItems);
-
-    mapper.writerWithDefaultPrettyPrinter()
-            .writeValue(outputFile.toFile(), root);
-
-    getLog().info(
-            "Collection Postman fusionnée créée : "
-                    + outputFile
-                    + " (" + mergedItems.size() + " requêtes)"
-    );
-}
-
-
-⸻
-
-Dans generateOneFolder
-
-Remplace :
-
-mergeFolder(
-        inputRoot.resolve("postman"),
-        outputRoot.resolve("release-" + releaseName + "-postman.json"),
-        ".json",
-        CommentType.JSON
-);
-
-par :
-
-mergePostmanCollections(
-        inputRoot.resolve("postman"),
-        outputRoot.resolve("release-" + releaseName + "-postman.json"),
-        "Release " + releaseName
-);
-
-
-⸻
-
-Exemple :
-
-Si tu as :
-
-postman/
- ├─ export.json
- ├─ import.json
- └─ cancel.json
-
-avec :
+la requête fusionnée devient :
 
 {
-  "item": [
-    { "name": "Export" }
-  ]
+  "name": "[COL-18810_RFP_EXPORT_AJUSTEMENT_FUU] Export Ajustement"
 }
 
-{
-  "item": [
-    { "name": "Import" }
-  ]
-}
-
-{
-  "item": [
-    { "name": "Cancel" }
-  ]
-}
-
-Le fichier généré contiendra :
-
-{
-  "info": {
-    "name": "Release 26.06.0-1-Both"
-  },
-  "item": [
-    { "name": "Export" },
-    { "name": "Import" },
-    { "name": "Cancel" }
-  ]
-}
-
-C’est le format attendu par Postman et tu pourras importer une seule collection contenant toutes les requêtes de la release.
+Ça permet de retrouver immédiatement de quel fichier provient chaque requête dans la collection finale. C’est souvent pratique quand une release contient des dizaines de collections Postman.
