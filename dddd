@@ -1,4 +1,4 @@
-Voici le BuildProdMojo complet :
+Voici l’implémentation complète de BuildProdMojo.java :
 
 package com.masociete.maven;
 
@@ -29,11 +29,11 @@ public class BuildProdMojo extends AbstractMojo {
     @Override
     public void execute() throws MojoExecutionException {
         try {
+            validateVersion(prodVersion);
+
             Path base = basedir.toPath();
             Path src = base.resolve("src");
             Path release = src.resolve("release");
-
-            validateVersion(prodVersion);
 
             if (withGeneric) {
                 generateReleaseFiles(
@@ -77,19 +77,32 @@ public class BuildProdMojo extends AbstractMojo {
 
         Files.createDirectories(outputRoot);
 
-        mergeSqlFolder(
+        mergeFolder(
                 inputRoot.resolve("sql-data"),
-                outputRoot.resolve("release-" + releaseName + "-data.sql")
+                outputRoot.resolve("release-" + releaseName + "-data.sql"),
+                ".sql",
+                CommentType.SQL
         );
 
-        mergeSqlFolder(
+        mergeFolder(
                 inputRoot.resolve("sql-struct"),
-                outputRoot.resolve("release-" + releaseName + "-struct.sql")
+                outputRoot.resolve("release-" + releaseName + "-struct.sql"),
+                ".sql",
+                CommentType.SQL
+        );
+
+        mergeFolder(
+                inputRoot.resolve("postman"),
+                outputRoot.resolve("release-" + releaseName + "-postman.json"),
+                ".json",
+                CommentType.JSON
         );
     }
 
-    private void mergeSqlFolder(Path inputFolder, Path outputFile)
-            throws IOException {
+    private void mergeFolder(Path inputFolder,
+                             Path outputFile,
+                             String extension,
+                             CommentType commentType) throws IOException {
 
         if (!Files.exists(inputFolder)) {
             getLog().warn("Dossier ignoré car introuvable : " + inputFolder);
@@ -101,9 +114,9 @@ public class BuildProdMojo extends AbstractMojo {
         try (Stream<Path> files = Files.list(inputFolder)) {
             files
                     .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().toLowerCase().endsWith(".sql"))
+                    .filter(path -> path.toString().toLowerCase().endsWith(extension))
                     .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                    .forEach(path -> appendSqlFile(result, path));
+                    .forEach(path -> appendFile(result, path, commentType));
         }
 
         Files.writeString(
@@ -117,14 +130,12 @@ public class BuildProdMojo extends AbstractMojo {
         getLog().info("Fichier créé : " + outputFile);
     }
 
-    private void appendSqlFile(StringBuilder result, Path path) {
+    private void appendFile(StringBuilder result, Path path, CommentType commentType) {
         try {
             String fileName = path.getFileName().toString();
 
             result.append(System.lineSeparator());
-            result.append("-- =============================================").append(System.lineSeparator());
-            result.append("-- FILE : ").append(fileName).append(System.lineSeparator());
-            result.append("-- =============================================").append(System.lineSeparator());
+            appendFileHeader(result, fileName, commentType);
             result.append(System.lineSeparator());
 
             result.append(Files.readString(path, StandardCharsets.UTF_8));
@@ -133,8 +144,25 @@ public class BuildProdMojo extends AbstractMojo {
             result.append(System.lineSeparator());
 
         } catch (IOException e) {
-            throw new RuntimeException("Erreur lecture fichier SQL : " + path, e);
+            throw new RuntimeException("Erreur lecture fichier : " + path, e);
         }
+    }
+
+    private void appendFileHeader(StringBuilder result, String fileName, CommentType commentType) {
+        if (commentType == CommentType.SQL) {
+            result.append("-- =============================================").append(System.lineSeparator());
+            result.append("-- FILE : ").append(fileName).append(System.lineSeparator());
+            result.append("-- =============================================").append(System.lineSeparator());
+        } else {
+            result.append("// =============================================").append(System.lineSeparator());
+            result.append("// FILE : ").append(fileName).append(System.lineSeparator());
+            result.append("// =============================================").append(System.lineSeparator());
+        }
+    }
+
+    private enum CommentType {
+        SQL,
+        JSON
     }
 }
 
@@ -146,7 +174,8 @@ Résultat :
 
 src/release/generic/release-generic-data.sql
 src/release/generic/release-generic-struct.sql
-
+src/release/generic/release-generic-postman.json
 
 src/release/26.06.5/release-26.06.5-data.sql
 src/release/26.06.5/release-26.06.5-struct.sql
+src/release/26.06.5/release-26.06.5-postman.json
