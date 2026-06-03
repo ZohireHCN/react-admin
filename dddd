@@ -1,249 +1,83 @@
-Voici la classe complète avec les noms de dossiers/fichiers en constantes :
+Hello team 👋,
 
-package com.masociete.maven;
+Je vous propose une tech review autour de plusieurs initiatives d’amélioration que je souhaiterais partager avec vous.
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
+⸻
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.Comparator;
-import java.util.stream.Stream;
+1. Optimisation des performances des batches via un cache applicatif
 
-@Mojo(name = "buildprod")
-public class BuildProdMojo extends AbstractMojo {
+Problématique
+	•	Plusieurs milliers d’appels à la base pour consulter des données de référence.
+	•	Lectures répétitives des mêmes informations au cours d’un même traitement.
+	•	Impact sur les temps d’exécution des batches et sur la charge de la base de données.
 
-    private static final String SRC_FOLDER = "src";
-    private static final String TARGET_FOLDER = "target";
-    private static final String GENERIC_FOLDER = "generic";
-    private static final String RELEASE_FOLDER = "release";
-    private static final String SQL_DATA_FOLDER = "sql-data";
-    private static final String SQL_STRUCT_FOLDER = "sql-struct";
-    private static final String POSTMAN_FOLDER = "postman";
+Solution
+	•	Mise en place d’un cache applicatif centralisé basé sur un singleton.
+	•	Chargement unique des référentiels puis réutilisation en mémoire durant l’exécution des traitements.
 
-    private static final String SQL_EXTENSION = ".sql";
-    private static final String JSON_EXTENSION = ".json";
+Bénéfices
+	•	Réduction significative des accès à la base de données.
+	•	Amélioration des performances des batches.
+	•	Réduction de la charge sur l’infrastructure.
+	•	Simplification de l’accès aux données de référence.
 
-    private static final String RELEASE_PREFIX = "release-";
-    private static final String DATA_SUFFIX = "-data.sql";
-    private static final String STRUCT_SUFFIX = "-struct.sql";
-    private static final String POSTMAN_SUFFIX = "-postman.json";
+📸 Architecture et fonctionnement du cache
 
-    private static final String POSTMAN_SCHEMA =
-            "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
+[screenshot]
 
-    @Parameter(property = "prodVersion", required = true)
-    private String prodVersion;
+⸻
 
-    @Parameter(property = "withGeneric", defaultValue = "false")
-    private boolean withGeneric;
+2. Automatisation de la préparation des livraisons via un plugin Maven
 
-    @Parameter(defaultValue = "${project.basedir}", readonly = true)
-    private File basedir;
+Problématique
+	•	Préparation manuelle des scripts SQL et des collections Postman.
+	•	Risque d’erreurs, d’oublis et manque d’homogénéité dans les livrables.
+	•	Temps passé important pour préparer les artefacts de release.
 
-    @Override
-    public void execute() throws MojoExecutionException {
-        try {
-            validateVersion(prodVersion);
+Solution
+	•	Développement d’un plugin Maven, sur le même principe que celui utilisé par OpenCell pour la génération des collections de scripts Java.
+	•	Génération automatique des artefacts de livraison à partir d’une simple commande Maven.
+	•	Consolidation des scripts SQL de structure et de données.
+	•	Fusion automatique des collections Postman.
+	•	Génération d’un dossier de livraison standardisé pour les composants communs (Generic), B2B et B2C.
 
-            Path base = basedir.toPath();
+Bénéfices
+	•	Une seule commande pour générer l’ensemble des livrables.
+	•	Standardisation des releases.
+	•	Réduction des manipulations manuelles.
+	•	Réduction des risques d’erreurs.
+	•	Gain de temps pour les équipes de développement et de delivery.
 
-            Path src = base.resolve(SRC_FOLDER);
-            Path sourceRelease = src.resolve(RELEASE_FOLDER);
-            Path targetRelease = base.resolve(TARGET_FOLDER).resolve(RELEASE_FOLDER);
+📸 Organisation des dossiers de release
 
-            if (withGeneric) {
-                generateOneFolder(
-                        src.resolve(GENERIC_FOLDER),
-                        targetRelease.resolve(GENERIC_FOLDER),
-                        GENERIC_FOLDER
-                );
-            }
+[screenshot]
 
-            Path versionRoot = sourceRelease.resolve(prodVersion);
+📸 Exemple des livrables générés automatiquement
 
-            if (!Files.exists(versionRoot)) {
-                throw new MojoExecutionException("Dossier version introuvable : " + versionRoot);
-            }
+[screenshot]
 
-            try (Stream<Path> folders = Files.list(versionRoot)) {
-                folders
-                        .filter(Files::isDirectory)
-                        .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                        .forEach(folder -> {
-                            try {
-                                String folderName = folder.getFileName().toString();
+⸻
 
-                                generateOneFolder(
-                                        folder,
-                                        targetRelease.resolve(prodVersion).resolve(folderName),
-                                        prodVersion + "-" + folderName
-                                );
+3. Renforcement du processus de mise en production
 
-                            } catch (Exception e) {
-                                throw new RuntimeException(e);
-                            }
-                        });
-            }
+Proposition
+	•	Protection de la branche pré-production afin de garantir sa stabilité avant chaque MEP.
+	•	Rejeu des scripts de mise en production sur l’environnement de pré-production au moins une semaine avant la MEP.
+	•	Exécution des TNR (Tests de Non Régression) et des tests de performance sur cette version candidate.
+	•	Validation technique et fonctionnelle des livrables avant le passage en production.
 
-            getLog().info("Génération terminée dans : " + targetRelease);
+Bénéfices
+	•	Détection anticipée des anomalies.
+	•	Réduction des risques liés aux mises en production.
+	•	Validation des performances avant le passage en production.
+	•	Processus de déploiement plus robuste et plus prévisible.
 
-        } catch (Exception e) {
-            throw new MojoExecutionException("Erreur pendant la génération release", e);
-        }
-    }
+📸 Workflow proposé de préparation et validation des releases
 
-    private void validateVersion(String version) throws MojoExecutionException {
-        if (version == null || version.trim().isEmpty()) {
-            throw new MojoExecutionException("Le paramètre prodVersion est obligatoire.");
-        }
+[screenshot]
 
-        if (!version.matches("\\d{2}\\.\\d{2}\\.\\d+")) {
-            throw new MojoExecutionException(
-                    "Version invalide : " + version + ". Exemple attendu : 26.06.0"
-            );
-        }
-    }
+⸻
 
-    private void generateOneFolder(Path inputRoot, Path outputRoot, String releaseName)
-            throws IOException {
+L’objectif de cette session sera de présenter les solutions retenues, partager les retours d’expérience et échanger sur les améliorations possibles autour des performances, de l’industrialisation des livraisons et de la sécurisation des mises en production.
 
-        Files.createDirectories(outputRoot);
-
-        mergeTextFolder(
-                inputRoot.resolve(SQL_DATA_FOLDER),
-                outputRoot.resolve(RELEASE_PREFIX + releaseName + DATA_SUFFIX),
-                SQL_EXTENSION
-        );
-
-        mergeTextFolder(
-                inputRoot.resolve(SQL_STRUCT_FOLDER),
-                outputRoot.resolve(RELEASE_PREFIX + releaseName + STRUCT_SUFFIX),
-                SQL_EXTENSION
-        );
-
-        mergePostmanCollections(
-                inputRoot.resolve(POSTMAN_FOLDER),
-                outputRoot.resolve(RELEASE_PREFIX + releaseName + POSTMAN_SUFFIX),
-                "Release " + releaseName
-        );
-    }
-
-    private void mergeTextFolder(Path inputFolder, Path outputFile, String extension)
-            throws IOException {
-
-        if (!Files.exists(inputFolder)) {
-            getLog().warn("Dossier ignoré : " + inputFolder);
-            return;
-        }
-
-        StringBuilder result = new StringBuilder();
-
-        try (Stream<Path> files = Files.list(inputFolder)) {
-            files
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().toLowerCase().endsWith(extension))
-                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                    .forEach(path -> appendSqlFile(result, path));
-        }
-
-        Files.writeString(
-                outputFile,
-                result.toString(),
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
-
-        getLog().info("Fichier SQL créé : " + outputFile);
-    }
-
-    private void appendSqlFile(StringBuilder result, Path path) {
-        try {
-            String fileName = path.getFileName().toString();
-
-            result.append(System.lineSeparator());
-            result.append("-- =============================================").append(System.lineSeparator());
-            result.append("-- FILE : ").append(fileName).append(System.lineSeparator());
-            result.append("-- =============================================").append(System.lineSeparator());
-            result.append(System.lineSeparator());
-
-            result.append(Files.readString(path, StandardCharsets.UTF_8));
-
-            result.append(System.lineSeparator()).append(System.lineSeparator());
-
-        } catch (IOException e) {
-            throw new RuntimeException("Erreur lecture fichier SQL : " + path, e);
-        }
-    }
-
-    private void mergePostmanCollections(Path inputFolder,
-                                         Path outputFile,
-                                         String collectionName) throws IOException {
-
-        if (!Files.exists(inputFolder)) {
-            getLog().warn("Dossier ignoré : " + inputFolder);
-            return;
-        }
-
-        ObjectMapper mapper = new ObjectMapper();
-
-        ObjectNode root = mapper.createObjectNode();
-
-        ObjectNode info = mapper.createObjectNode();
-        info.put("name", collectionName);
-        info.put("schema", POSTMAN_SCHEMA);
-        root.set("info", info);
-
-        ArrayNode mergedItems = mapper.createArrayNode();
-
-        try (Stream<Path> files = Files.list(inputFolder)) {
-            files
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().toLowerCase().endsWith(JSON_EXTENSION))
-                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                    .forEach(path -> appendPostmanItems(mapper, mergedItems, path));
-        }
-
-        root.set("item", mergedItems);
-
-        mapper.writerWithDefaultPrettyPrinter()
-                .writeValue(outputFile.toFile(), root);
-
-        getLog().info("Collection Postman créée : " + outputFile);
-    }
-
-    private void appendPostmanItems(ObjectMapper mapper, ArrayNode mergedItems, Path path) {
-        try {
-            JsonNode json = mapper.readTree(path.toFile());
-
-            if (!json.has("item") || !json.get("item").isArray()) {
-                getLog().warn("Fichier Postman ignoré, pas de tableau item : " + path);
-                return;
-            }
-
-            json.get("item").forEach(mergedItems::add);
-
-            getLog().info("Items Postman ajoutés depuis : " + path.getFileName());
-
-        } catch (IOException e) {
-            throw new RuntimeException("Erreur lecture JSON Postman : " + path, e);
-        }
-    }
-}
-
-Dépendance à ajouter dans le pom.xml :
-
-<dependency>
-    <groupId>com.fasterxml.jackson.core</groupId>
-    <artifactId>jackson-databind</artifactId>
-    <version>2.18.2</version>
-</dependency>
+Merci.
