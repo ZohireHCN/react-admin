@@ -1,83 +1,9 @@
-Hello team 👋,
+Bonjour,
 
-Je vous propose une tech review autour de plusieurs initiatives d’amélioration que je souhaiterais partager avec vous.
+J’ai changé d’employeur le 5 mai et mon taux de prélèvement à la source actuel est de 3 %.
 
-⸻
+J’ai constaté qu’un prélèvement a été effectué au taux de 15,8 %. Pouvez-vous m’indiquer s’il est possible d’obtenir le remboursement du trop-perçu et quelles démarches je dois effectuer ?
 
-1. Optimisation des performances des batches via un cache applicatif
+Merci par avance pour votre retour.
 
-Problématique
-	•	Plusieurs milliers d’appels à la base pour consulter des données de référence.
-	•	Lectures répétitives des mêmes informations au cours d’un même traitement.
-	•	Impact sur les temps d’exécution des batches et sur la charge de la base de données.
-
-Solution
-	•	Mise en place d’un cache applicatif centralisé basé sur un singleton.
-	•	Chargement unique des référentiels puis réutilisation en mémoire durant l’exécution des traitements.
-
-Bénéfices
-	•	Réduction significative des accès à la base de données.
-	•	Amélioration des performances des batches.
-	•	Réduction de la charge sur l’infrastructure.
-	•	Simplification de l’accès aux données de référence.
-
-📸 Architecture et fonctionnement du cache
-
-[screenshot]
-
-⸻
-
-2. Automatisation de la préparation des livraisons via un plugin Maven
-
-Problématique
-	•	Préparation manuelle des scripts SQL et des collections Postman.
-	•	Risque d’erreurs, d’oublis et manque d’homogénéité dans les livrables.
-	•	Temps passé important pour préparer les artefacts de release.
-
-Solution
-	•	Développement d’un plugin Maven, sur le même principe que celui utilisé par OpenCell pour la génération des collections de scripts Java.
-	•	Génération automatique des artefacts de livraison à partir d’une simple commande Maven.
-	•	Consolidation des scripts SQL de structure et de données.
-	•	Fusion automatique des collections Postman.
-	•	Génération d’un dossier de livraison standardisé pour les composants communs (Generic), B2B et B2C.
-
-Bénéfices
-	•	Une seule commande pour générer l’ensemble des livrables.
-	•	Standardisation des releases.
-	•	Réduction des manipulations manuelles.
-	•	Réduction des risques d’erreurs.
-	•	Gain de temps pour les équipes de développement et de delivery.
-
-📸 Organisation des dossiers de release
-
-[screenshot]
-
-📸 Exemple des livrables générés automatiquement
-
-[screenshot]
-
-⸻
-
-3. Renforcement du processus de mise en production
-
-Proposition
-	•	Protection de la branche pré-production afin de garantir sa stabilité avant chaque MEP.
-	•	Rejeu des scripts de mise en production sur l’environnement de pré-production au moins une semaine avant la MEP.
-	•	Exécution des TNR (Tests de Non Régression) et des tests de performance sur cette version candidate.
-	•	Validation technique et fonctionnelle des livrables avant le passage en production.
-
-Bénéfices
-	•	Détection anticipée des anomalies.
-	•	Réduction des risques liés aux mises en production.
-	•	Validation des performances avant le passage en production.
-	•	Processus de déploiement plus robuste et plus prévisible.
-
-📸 Workflow proposé de préparation et validation des releases
-
-[screenshot]
-
-⸻
-
-L’objectif de cette session sera de présenter les solutions retenues, partager les retours d’expérience et échanger sur les améliorations possibles autour des performances, de l’industrialisation des livraisons et de la sécurisation des mises en production.
-
-Merci.
+Cordialement,
