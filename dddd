@@ -1,10 +1,141 @@
-private void logMemory(String step) {
-    Runtime rt = Runtime.getRuntime();
+Le souci principal :
 
-    long usedMb = (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024;
-    long totalMb = rt.totalMemory() / 1024 / 1024;
-    long maxMb = rt.maxMemory() / 1024 / 1024;
+byte[] 2 Mo
+→ convertBytesToDoubles()
+→ List<Double>
+→ calculs
+→ convertDoublesToBytes()
 
-    log.info("[MEMORY] {} | used={} MB | total={} MB | max={} MB",
-            step, usedMb, totalMb, maxMb);
+List<Double> est très coûteux : chaque Double est un objet. Donc 2 Mo en base peuvent devenir beaucoup plus en mémoire, surtout avec plusieurs threads.
+
+Solution optimale :
+
+1. Cache applicatif des templates binaires
+
+Comme ce sont des données de référence/templates, il faut les charger une seule fois.
+
+Exemple simple :
+
+private final Map<String, byte[]> binaryTemplateCache = new ConcurrentHashMap<>();
+
+private byte[] getTemplateBytes(String key, Curve curve) {
+    return binaryTemplateCache.computeIfAbsent(key, k -> curve.getBinaryCurve().getData());
 }
+
+Mais attention : ne modifie jamais directement le byte[] du cache.
+
+Si tu dois le modifier :
+
+byte[] source = getTemplateBytes(key, curve);
+byte[] workingCopy = Arrays.copyOf(source, source.length);
+
+
+⸻
+
+2. Éviter List<Double>
+
+À remplacer idéalement par :
+
+double[]
+
+au lieu de :
+
+List<Double>
+
+Très important.
+
+Actuellement :
+
+List<Double> values = convertBytesToDoubles(bytes);
+
+À optimiser vers :
+
+double[] values = convertBytesToDoubleArray(bytes);
+
+Pourquoi ?
+double[] = mémoire compacte.
+List<Double> = énorme overhead mémoire.
+
+⸻
+
+3. Cache du format déjà converti
+
+Si les templates ne changent pas, cache directement la version calculable :
+
+private final Map<String, double[]> templateDoubleCache = new ConcurrentHashMap<>();
+
+Exemple :
+
+private double[] getTemplateDoubles(String key, byte[] data) {
+    return templateDoubleCache.computeIfAbsent(key, k -> convertBytesToDoubleArray(data));
+}
+
+Mais pareil : si le calcul modifie le tableau, il faut copier :
+
+double[] template = getTemplateDoubles(key, data);
+double[] working = Arrays.copyOf(template, template.length);
+
+
+⸻
+
+4. Ne reconvertir en byte[] qu’à la fin
+
+Pattern recommandé :
+
+double[] adjusted = getCachedTemplateDoubles(adjustedKey);
+double[] dynamic = getCachedTemplateDoubles(dynamicKey);
+
+double[] result = merge(adjusted, dynamic);
+
+byte[] bytesToSave = convertDoubleArrayToBytes(result);
+
+Donc :
+
+DB bytes → double[] cache → calcul double[] → bytes final
+
+Au lieu de :
+
+DB bytes → List<Double> → Cdc → List<Double> → byte[] → Cdc → etc.
+
+
+⸻
+
+5. Attention au parallel()
+
+Ton code a :
+
+IntStream.range(...).parallel().forEach(...)
+
+Sur de gros tableaux, ça peut empirer la mémoire et la pression CPU/GC.
+
+Je testerais d’abord sans parallel() :
+
+for (int i = startIndex; i <= lastIndex; i++) {
+    Double value = cdc.getCdcPuissances().get(i - startIndex);
+    if (value != null) {
+        cdcPuissances.set(i, value);
+    }
+}
+
+Ou mieux avec double[].
+
+⸻
+
+Architecture cible
+
+TemplateCache
+  - key: profileId + subProfile + type
+  - value: double[]
+
+Batch
+  - récupère template depuis cache
+  - copie seulement si modification
+  - fait les calculs en double[]
+  - convertit en byte[] uniquement avant insert/update
+
+Le plus gros gain viendra de ces deux changements :
+
+1. Remplacer List<Double> par double[]
+2. Cacher les templates déjà convertis
+
+Ça peut diviser la mémoire par plusieurs fois et réduire fortement les allocations GC.
