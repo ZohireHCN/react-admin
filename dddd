@@ -1,993 +1,1511 @@
-package com.alpiq.rfp;
+package org.meveo.model.rfp;
 
-import com.alpiq.factu.ReportingDto;
-import org.jetbrains.annotations.NotNull;
 import org.meveo.admin.exception.BusinessException;
-import org.meveo.model.rfp.*;
-import org.meveo.security.MeveoUser;
-import org.meveo.service.rfp.*;
-import org.meveo.service.script.Script;
 
-import javax.persistence.NoResultException;
-import java.math.BigDecimal;
-import java.time.ZoneId;
-import java.time.ZonedDateTime;
+import java.time.*;
 import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ForkJoinPool;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
+import java.util.stream.IntStream;
 
-import static com.alpiq.rfp.MeterReading.getTemporalCat;
-import static com.alpiq.rfp.RfpJobUtils.EMPTY_STRING;
-import static com.alpiq.rfp.RfpJobUtils.isJobLaunchAutomatic;
+import static java.util.Optional.ofNullable;
 
-/**
- * Builds consumption load curves (profiling) at PRM and RFP levels.
- * <p>
- * Depending on parameters, this script can:
- * <ul>
- *   <li>Profile a list of PRMs (PRM mode)</li>
- *   <li>Profile all PRMs of one or more RFPs (RFP mode)</li>
- *   <li>Run a default profiling selection for PRMs matching eligibility criteria (DEFAULT mode)</li>
- * </ul>
- * The script reads billed meter readings, correlates profile coefficients, distributes
- * energy across temporal classes and persists computed curves. It also updates PRM
- * processing statuses and derived attributes (e.g., poste).
- * </p>
- */
-public class CurveProfilingScript extends Script {
-    private static final String PRM_REFS_PARAM = "prmRefs";
-    private static final String RFP_IDS_PARAM = "rfpIds";
-    private static final String THREAD_COUNT_PARAM = "threadCount";
-    private static final String MEMORY_LIMIT_PARAM = "memoryLimit";
-    private static final String C5_LISSE = "calcC5Lissée";
-    private static final String C5_LISSE_DISABLED = "Désactivé";
-    private static final String SEMI_COLON = ";";
-    private static final String PARIS_TIME_ZONE = "Europe/Paris";
-    private static final Map<String, Double> THETA_VALUES = Map.of(
-            "PRO1_BASE", 0.08004,
-            "PRO2_HP", 0.0873,
-            "PRO2_HC", 0.04227,
-            "PRO5_BASE", 0.37297,
-            "PRO6_HPSH", 0.04522,
-            "PRO6_HCSH", 0.02202,
-            "PRO6_HPSB", 0.04208,
-            "PRO6_HCSB", 0.02025
-    );
-    // Reusable DTF for thread safety and performance
-    private static final DateTimeFormatter DATE_FORMATTER =
-            DateTimeFormatter.ofPattern("dd/MM/yyyy")
-                    .withZone(ZoneId.of(PARIS_TIME_ZONE));
-    private static final String DEFAULT_CALENDAR = "Distributeur";
-    private final transient ReportingDto report = new ReportingDto();
-    private final transient AtomicInteger okCounter = new AtomicInteger(0);
-    private final transient AtomicInteger koCounter = new AtomicInteger(0);
-    private final transient AtomicInteger warnCounter = new AtomicInteger(0);
-    private final transient CurveService curveService = (CurveService) getServiceInterface(CurveService.class.getSimpleName());
-    private final transient RfpService rfpService = (RfpService) getServiceInterface(RfpService.class.getSimpleName());
-    private final transient RfpDetailService rfpDetailService = (RfpDetailService) getServiceInterface(RfpDetailService.class.getSimpleName());
-    private final transient CorrelationTableService correlationTableService = (CorrelationTableService) getServiceInterface(CorrelationTableService.class.getSimpleName());
-    private final transient SubProfileCoefficientService subProfileCoefficientService = (SubProfileCoefficientService) getServiceInterface(SubProfileCoefficientService.class.getSimpleName());
-    private final transient BilledMeterReadingService bmrService = (BilledMeterReadingService) getServiceInterface(BilledMeterReadingService.class.getSimpleName());
-    private final transient PrmService prmService = (PrmService) getServiceInterface(PrmService.class.getSimpleName());
-    private final transient BilledCurveService billedCurveService = (BilledCurveService) getServiceInterface(BilledCurveService.class.getSimpleName());
-    private final transient EnedisContractualDataService enedisContractualDataService = (EnedisContractualDataService) getServiceInterface(EnedisContractualDataService.class.getSimpleName());
-    private final transient ContractualSituationService contractualSituationService = (ContractualSituationService) getServiceInterface(ContractualSituationService.class.getSimpleName());
-    private final transient List<String> notFoundPrms = Collections.synchronizedList(new ArrayList<>());
-    private final transient List<Long> notFoundRfps = Collections.synchronizedList(new ArrayList<>());
-    private final transient List<String> noMeasuresFoundPrms = Collections.synchronizedList(new ArrayList<>());
-    private final transient List<String> noProfileCoeffFoundPrms = Collections.synchronizedList(new ArrayList<>());
-    private transient ProfilingTypeEnum profilingType = ProfilingTypeEnum.DEFAULT;
-    private transient List<Long> rfpIds = new ArrayList<>();
-    private transient List<String> prmRefs = new ArrayList<>();
-    private transient String getC5Lisse;
+public class Cdc {
 
-    private transient List<CorrelationTable> correlationTable = null;
-    private transient List<SubProfileCoefficient> subProfileCoefficients = new ArrayList<>();
-    private transient String jobUser;
-    private transient ConcurrentHashMap<String, List<Long>> prmIdsByPoste = new ConcurrentHashMap<>();
+    private static final ZoneId currentZoneId = ZoneId.of("Europe/Paris");
 
-    private static final double MEMORY_MARGIN = 0.5;
-    private static final double MAX_MEMORY =  (Runtime.getRuntime().maxMemory() / 1000000000D) * MEMORY_MARGIN;
-    private static final double MAX_MEMORY_PERCENTAGE = 0.9;
-    private static final long GC_INTERVAL = 3;
-    private transient long gcLaunchTime = 0;
-    private final transient List<Long> prmIdsList = Collections.synchronizedList(new ArrayList<>());
-    private transient int threadCount = Runtime.getRuntime().availableProcessors();
-    private transient double memoryLimit = (MAX_MEMORY * MAX_MEMORY_PERCENTAGE);
+    private ZonedDateTime cdcDateDebut;
+    private ZonedDateTime cdcDateFin;
+    private StepEnum cdcPas;
+    private List<ZonedDateTime> cdcDates;
+    private String libelle;
+    private Boolean erreurBin;
+    private Long crbId;
+    private List<Double> cdcPuissances = new ArrayList<>();
+    private Curve curve;
+    private BinaryCurve binaryCurve;
 
-    private static final Map<String, String> TEMP_CLASS_CAT_MAPPING = Map.of(
-            "BASE", "BASE",
-            "HPHC", "HP",
-            "SAISON", "HPH"
-    );
+    public Cdc() {
+    }
 
-    private transient boolean automaticJobLaunch = false;
+    public Cdc(List<ZonedDateTime> dates, List<Double> puissances) {
+        checkDiscontinuity(dates);
 
-    /**
-     * Entry point of the profiling script.
-     * <p>
-     * Recognized parameters in {@code context}:
-     * <ul>
-     *   <li>{@code prmRefs}: semicolon-separated PRM references list (PRM mode)</li>
-     *   <li>{@code rfpIds}: semicolon-separated RFP IDs list (RFP mode)</li>
-     *   <li>{@code threadCount}: optional custom parallelism level</li>
-     *   <li>{@code memoryLimit}: optional memory limit ratio</li>
-     * </ul>
-     * </p>
-     * @param context Job execution context and parameters.
-     * @throws BusinessException If configuration or processing fails.
-     */
-    @Override
-    public void execute(Map<String, Object> context) throws BusinessException {
-        log.info("Executing CurveProfilingScript with method {}", context);
-        jobUser = ((MeveoUser) context.getOrDefault(CONTEXT_CURRENT_USER, "")).getUserName();
-        automaticJobLaunch = isJobLaunchAutomatic(context);
+        if(dates.size() != puissances.size()) {
+            throw new BusinessException("Dates and puissances lists should have the same size");
+        }
 
-        try {
-            validateParams(context);
-            retrieveConfiguration();
-        } catch (BusinessException e) {
-            koCounter.incrementAndGet();
-            report.rep(e.getMessage());
-            setJobReportData(context);
+        remplirCdc(cdcPas, dates.get(0), dates.get(dates.size() - 1));
+        cdcDates = dates;
+        cdcPuissances = puissances;
+        if(curve != null && curve.getBinaryCurve() != null) {
+            curve.getBinaryCurve().setData(convertDoublesToBytes(cdcPuissances));
+        }
+    }
+
+    private void checkDiscontinuity(List<ZonedDateTime> dates) {
+        if(dates.size() < 2) {
+            throw new BusinessException("Not enough dates to determine step");
+        }
+        cdcPas = getStepEnum(dates.get(1), dates.get(0));
+
+        if(cdcPas == StepEnum.Journalier) {
+            for(int i = 1 ; i < dates.size() ; i++){
+                if(!dates.get(i-1).plusDays(1).isEqual(dates.get(i))) {
+                    StringBuilder message = new StringBuilder("Discontinuity in dates for the period ")
+                            .append(dates.get(0).toLocalDate())
+                            .append(" to ")
+                            .append(dates.get(dates.size()-1).toLocalDate());
+                    if (curve != null && curve.getCurveType() != null) message.append(" for ").append(curve.getCurveType());
+                    throw new BusinessException(message.toString());
+                }
+            }
             return;
         }
 
-        try {
-            switch (profilingType) {
-                case PRM:
-                    prmProfiling();
-                    break;
-                case RFP:
-                    rfpProfiling();
-                    break;
-                case DEFAULT:
-                    defaultProfiling();
+        int n = calculerNbPtsParHeure(cdcPas);
+        // check if there is a discontinuity in the dates
+        for (int i = 1; i < dates.size(); i++) {
+            if (ChronoUnit.MINUTES.between(dates.get(i - 1), dates.get(i)) != 60 / n) {
+                StringBuilder message = new StringBuilder("Discontinuity in dates for the period ")
+                        .append(dates.get(0).toLocalDate())
+                        .append(" to ")
+                        .append(dates.get(dates.size()-1).toLocalDate());
+                if (curve != null && curve.getCurveType() != null) message.append(" for ").append(curve.getCurveType());
+                throw new BusinessException(message.toString());
             }
-
-            if(!prmIdsList.isEmpty()){
-                prmService.selectPrmsAndupdateLoadCurveIntegration(prmIdsList, "rfd_reconstitution_status_id", RfpStatusEnum.TREATED.getId().intValue(), jobUser);
-                prmService.selectPrmsAndupdateLoadCurveIntegration(prmIdsList, "rfd_average_reconstitution_status_id", RfpStatusEnum.TO_TREAT.getId().intValue(), jobUser);
-            }
-
-            updatePrmPostes();
-        } catch (Exception e) {
-            log.info("Error while processing curves", e);
-            throw e;
         }
-
-        setJobReportData(context);
-        curveService.getEntityManager().flush();
     }
 
-    /**
-     * Persists computed PRM {@code poste} grouping in bulk for all processed PRMs.
-     * Uses a single update per poste value.
-     */
-    private void updatePrmPostes() {
-        for(Map.Entry<String, List<Long>> entry : prmIdsByPoste.entrySet()) {
+    public Cdc(Curve curve) {
+        this(curve, Cdc.convertBytesToDoubles(curve.getBinaryCurve().getData()));
+    }
+
+    public StepEnum getStepFromDatesAndValues(ZonedDateTime start, ZonedDateTime end, List<Double> values) {
+        try {
+            if (start.isAfter(end)) {
+                throw new BusinessException("Start date is after end date");
+            }
+
+            long minutesDiff = ChronoUnit.MINUTES.between(start, end);
+            float minutesDuration = Math.round(minutesDiff / (float) values.size());
+
             try {
-                prmService.getEntityManager().createQuery("update Prm prm set prm.poste = :poste where prm.id in :prmIds")
-                        .setParameter("poste", entry.getKey())
-                        .setParameter("prmIds", entry.getValue())
-                        .executeUpdate();
+                return StepEnum.fromDurationInMinutes((int) minutesDuration);
             } catch (Exception e) {
-                throw new BusinessException("Error while updating prm postes {}" + e.getMessage(), e);
+                return null;
             }
-        }
-    }
-
-
-    /**
-     * Profiles the list of PRMs provided via the {@code prmRefs} parameter.
-     * Each PRM is processed independently; counters and reports are updated accordingly.
-     */
-    private void prmProfiling() {
-        for (String prmRef : prmRefs) {
-            try {
-                processPrm(prmRef);
-            } catch (NoMeasuresFoundException e) {
-                log.info(e.getMessage());
-                koCounter.incrementAndGet();
-                noMeasuresFoundPrms.add(prmRef);
-            } catch (ObjectNotFoundException e) {
-                log.info(e.getMessage());
-                notFoundPrms.add(prmRef);
-                koCounter.incrementAndGet();
-            } catch (ProfileCoeffNotFound e) {
-                log.info(e.getMessage());
-                koCounter.incrementAndGet();
-                noProfileCoeffFoundPrms.add(prmRef);
-            } catch (BusinessException e) {
-                log.info(e.getMessage());
-                koCounter.incrementAndGet();
-            } finally {
-                checkMemoryConsumption();
-            }
-        }
-    }
-
-    /**
-     * Profiles all PRMs attached to the provided RFP IDs.
-     * Errors for individual RFPs are collected without stopping the entire batch.
-     */
-    private void rfpProfiling() {
-        for (Long rfpId : rfpIds) {
-            try {
-                processRfp(rfpId);
-            } catch (ObjectNotFoundException e) {
-                log.info(e.getMessage());
-                notFoundRfps.add(rfpId);
-                koCounter.incrementAndGet();
-            } catch (BusinessException e) {
-                log.info(e.getMessage());
-                koCounter.incrementAndGet();
-            }
-        }
-    }
-
-    /**
-     * Performs profiling for a default selection of PRMs that are eligible based on
-     * contractual segment, statuses and measure properties.
-     * @throws BusinessException On query or processing failures.
-     */
-    private void defaultProfiling() throws BusinessException {
-        try {
-            List<Prm> prms = rfpDetailService.getEntityManager().createQuery("select distinct rfd.prm " +
-                            "from RfpDetail rfd inner join EnedisContractualData ecd on ecd.prm.id = rfd.prm.id " +
-                                    "inner join ContractualSituation cos on cos.enedisContractualData.id = ecd.id " +
-                                    "inner join BilledMeterReading bmr on bmr.prm.id = rfd.prm.id " +
-                            "where rfd.archived != true and rfd.prm.archived != true and cos.segment = :segment " +
-                                    "and rfd.reconstitutionStatusId = :status " +
-                                    "and bmr.calendar = :calendar and bmr.measureName != :estimated "
-                            , Prm.class)
-                    .setParameter("status", RfpStatusEnum.TO_TREAT.getId())
-                    .setParameter("segment", "C5")
-                    .setParameter("calendar", DEFAULT_CALENDAR)
-                    .setParameter("estimated", "Estimé")
-                    .getResultList();
-
-            processPrms(prms);
         } catch (BusinessException e) {
-            report.rep(e.getMessage());
-        }
-    }
-
-    /**
-     * Processes a list of PRMs in parallel using a ForkJoinPool.
-     * Manages lifecycle of the thread pool and aggregates results and errors.
-     *
-     * @param prms PRMs to process.
-     * @throws BusinessException If execution of parallel tasks fails.
-     */
-    private void processPrms(List<Prm> prms) throws BusinessException {
-        AtomicInteger counter = new AtomicInteger(0);
-
-        ForkJoinPool customThreadPool = new ForkJoinPool(threadCount);
-        try {
-            customThreadPool.submit(() ->
-                    prms.parallelStream().forEach(prm -> {
-                        try {
-                            log.info("Processing PRM {}/{} with ref : {}",
-                                    counter.incrementAndGet(), prms.size(), prm.getReference());
-                            processPrm(prm);
-                        } catch (NoMeasuresFoundException e) {
-                            koCounter.incrementAndGet();
-                            noMeasuresFoundPrms.add(prm.getReference());
-                        } catch (ProfileCoeffNotFound e) {
-                            koCounter.incrementAndGet();
-                            noProfileCoeffFoundPrms.add(prm.getReference());
-                        } catch (BusinessException e) {
-                            koCounter.incrementAndGet();
-                            report.rep(e.getMessage());
-                        } finally {
-                            checkMemoryConsumption();
-                        }
-                    })
-            ).get();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new BusinessException("Processing was interrupted", e);
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof BusinessException) {
-                throw (BusinessException) cause;
-            }
-            throw new BusinessException("Processing failed", cause);
-        } finally {
-            customThreadPool.shutdown();
-            try {
-                // Wait for existing tasks to terminate
-                if (!customThreadPool.awaitTermination(6, TimeUnit.HOURS)) {
-                    log.warn("Thread pool didn't terminate gracefully, forcing shutdown");
-                    customThreadPool.shutdownNow();
-                    // Wait a bit more for tasks to respond to being cancelled
-                    if (!customThreadPool.awaitTermination(10, TimeUnit.SECONDS)) {
-                        log.error("Thread pool didn't terminate after forced shutdown");
-                    }
-                }
-            } catch (InterruptedException e) {
-                log.warn("Interrupted while waiting for thread pool shutdown");
-                customThreadPool.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
-        }
-    }
-
-    /**
-     * Loads a PRM by reference and processes it.
-     *
-     * @param prmRef PRM reference.
-     * @throws BusinessException On processing errors.
-     * @throws ObjectNotFoundException If the PRM cannot be found.
-     * @throws NoMeasuresFoundException If no eligible measures are found for the PRM.
-     */
-    private void processPrm(String prmRef) throws BusinessException, ObjectNotFoundException, NoMeasuresFoundException {
-        Prm prm;
-
-        try {
-            prm = prmService.getEntityManager().createQuery("select prm from Prm prm where reference = :reference", Prm.class)
-                    .setParameter("reference", prmRef)
-                    .getSingleResult();
-        } catch (Exception e) {
-            throw new ObjectNotFoundException("PRM non trouvé : " + prmRef);
-        }
-
-        processPrm(prm);
-    }
-
-
-    /**
-     * Processes a single PRM: reads measures, determines temporal class target,
-     * builds curves and persists results.
-     *
-     * @param prm PRM entity.
-     * @throws BusinessException On processing errors or data inconsistencies.
-     * @throws NoMeasuresFoundException If the PRM has no eligible billed measures.
-     */
-    private void processPrm(Prm prm) throws BusinessException, NoMeasuresFoundException {
-        Map<String, Cdc> profileMap = new HashMap<>();
-        List<BilledMeterReading> bmrList = getBilledMeterReadings(prm);
-     //        report.rep("[1] début traitement de " + bmrList.size() + " relèves distributeur non estimé pour PRM " + prm.getReference());
-
-        if (bmrList.isEmpty()) {
-            throw new NoMeasuresFoundException("Aucune relève trouvée pour le PRM " + prm.getReference());
-        }
-
-        bmrList.forEach(bmr -> {
-            String tClass = bmr.getTemporalClass();
-            if (tClass.equals("HCB")) {
-                bmr.setTemporalClass("HCE");
-            } else if (tClass.equals("HPB")) {
-                bmr.setTemporalClass("HPE");
-            }
-        });
-
-        getFuds(prm, bmrList);
-
-        MeterReadingList meterReadingList = new MeterReadingList();
-        if(C5_LISSE_DISABLED.equals(getC5Lisse)){
-            bmrList.forEach(meterReadingList::add);
-        } else {
-            bmrList.forEach(meterReadingList::addDailySplit);
-        }
-
-   /*     report.rep("[2] équivalent de " + meterReadingList.getList().size() + " meterReading pour PRM " + prm.getReference());
-        meterReadingList.getList().forEach(mr -> {
-            report.rep("MeterReading [" + mr.getStartDate().toLocalDate() + " -> " + mr.getEndDate().toLocalDate() + "]");
-            for (Map.Entry<String, BilledMeterReading> e : mr.getBmrList().entrySet()) {
-                if(!"BASE".equals(e.getKey()) && e.getValue().getMeasure() > 0D){
-                    report.rep("   " + e.getKey() + " => " + e.getValue());
-                }
-            }
-        }); */
-
-        String fournisseurTemporalCat = getLastFournisseurMeasureTemporalClass(prm);
-        addPrmToPosteMap(prm.getId(), getPrmPoste(prm));
-
-        Map<String, Cdc> cdcMap = new HashMap<>();
-        String targetClassCat = getPrmTargetClass(prm, fournisseurTemporalCat);
-        // report.rep("[3] la classe temp de la dernière relève est : " + targetClassCat + " pour prm " + prm.getReference() + " contenant " + bmrList.size() + " relèves.");
-        handleMeterReadingList(prm, targetClassCat, cdcMap, profileMap, meterReadingList);
-        // Save curves
-        saveCurves(prm, cdcMap, targetClassCat);
-        prmIdsList.add(prm.getId());
-        okCounter.incrementAndGet();
-        profileMap.clear();
-    }
-
-    /**
-     * Adds a PRM ID to the internal map keyed by poste in a thread-safe manner.
-     * @param prmId PRM identifier.
-     * @param poste Poste value resolved for the PRM.
-     */
-    private synchronized void addPrmToPosteMap(Long prmId, String poste){
-        prmIdsByPoste.computeIfAbsent(poste, k -> new ArrayList<>()).add(prmId);
-    }
-
-    /**
-     * Resolves the poste for a PRM, using its sub-profile or deducing it from the latest
-     * temporal class and the mapping rules.
-     * @param prm PRM entity.
-     * @return Poste value.
-     * @throws BusinessException If poste cannot be determined.
-     */
-    private String getPrmPoste(Prm prm) {
-        String subProfile;
-
-        if(prm.getSubProfile() == null || prm.getSubProfile().isBlank()) {
-            String tempClass = getPosteTemporalClass(prm);
-            if("PRO5_BASE_TEMPORAL_CLASS".equals(tempClass)) {
-                subProfile = "PRO5_BASE";
-            }else {
-                subProfile = getSubProfileMapping(tempClass);
-            }
-        } else {
-            subProfile = prm.getSubProfile();
-        }
-
-        int underscoreIndex = subProfile.indexOf('_');
-        if(underscoreIndex == -1) {
-            throw new BusinessException("Unable to identify poste for prm "+ prm.getReference());
-        }
-        return subProfile.substring(0, underscoreIndex);
-    }
-
-    /**
-     * Retrieves the most recent temporal class observed for a PRM, across calendars,
-     * with precedence rules :
-     * 1) (Fournisseur && temporalClass = BASE && usageContext in ('UPIN', 'ECPU')
-     * 2) (Fournisseur over Distributeur, Réel over Estimé).
-     * @param prm PRM entity.
-     * @return Temporal class string or empty when unavailable.
-     */
-    private String getPosteTemporalClass(Prm prm) {
-        try {
-            String temporalClass = bmrService.getEntityManager().createQuery("select temporalClass from BilledMeterReading " +
-                    "where calendar = 'Fournisseur' and prm.id = :prmId order by endDate desc", String.class)
-                    .setParameter("prmId", prm.getId())
-                    .setMaxResults(1)
-                    .getSingleResult();
-
-            if("BASE".equals(temporalClass)){
-                ContractualSituation contractualSituation = contractualSituationService.getEntityManager()
-                        .createQuery("select cs from ContractualSituation cs " +
-                                "where cs.enedisContractualData.prm.id = :prmId " +
-                                "and cs.usageContext in ('UPIN', 'ECPU')", ContractualSituation.class)
-                        .setParameter("prmId", prm.getId())
-                        .setMaxResults(1)
-                        .getSingleResult();
-
-                if(contractualSituation != null){
-                    return "PRO5_BASE_TEMPORAL_CLASS";
-                }
-                return getTemporalClassOfLastBilledMeterReading(prm);
-            }
-            return getTemporalClassOfLastBilledMeterReading(prm);
-
-        } catch (Exception e) {
-            return getTemporalClassOfLastBilledMeterReading(prm);
-        }
-    }
-
-
-    private String getTemporalClassOfLastBilledMeterReading(Prm prm) {
-        try {
-            return bmrService.getEntityManager().createQuery("select temporalClass from BilledMeterReading " +
-                    "where prm.id = :prmId order by endDate desc, case when calendar = 'Fournisseur' then 1 " +
-                    "when calendar = 'Distributeur' then 2 else 3 end, " +
-                    "case when measureName = 'Réel' then 1 when measureName = 'Estimé' then 2 else 3 end", String.class)
-                    .setParameter("prmId", prm.getId())
-                    .setMaxResults(1)
-                    .getSingleResult();
-        } catch (Exception e) {
-            log.info("Unable to find temporal class for PRM {} : {}", prm.getReference(), e.getMessage(), e);
-            return EMPTY_STRING;
-        }
-    }
-
-    /**
-     * Retrieves the temporal class of the latest Fournisseur measure for a PRM.
-     * @param prm PRM entity.
-     * @return Temporal class string.
-     * @throws BusinessException If no Fournisseur measure is available.
-     */
-    private String getLastFournisseurMeasureTemporalClass(Prm prm) {
-        String result = bmrService.getEntityManager().createQuery("select bmr.temporalClass from BilledMeterReading bmr " +
-                "where bmr.prm.id = :prmId and bmr.calendar = :calendar and bmr.measureName != :estimated " +
-                        "order by bmr.endDate desc", String.class)
-                .setParameter("prmId", prm.getId())
-                .setParameter("calendar", "Fournisseur")
-                .setParameter("estimated", "Estimé")
-                .getResultStream().findFirst().orElse(null);
-
-        if(result == null) {
-            throw new BusinessException("Unable to find last measure for prm "+ prm.getReference());
-        }
-
-        if(result.equals("HCB") || result.equals("HCE") || result.equals("HPB") || result.equals("HPE")) {
-            result = result.replace("B", "E");
-        }
-
-        return result;
-    }
-
-    private String getPrmTargetClass(Prm prm, String defaultTemporalClass) {
-        if(prm.getSubProfile() == null || prm.getSubProfile().isBlank()) {
-          return MeterReading.getTemporalCat(defaultTemporalClass);
-        } else if(prm.getSubProfile().endsWith("BASE")){
-            return "BASE";
-        } else if (prm.getSubProfile().endsWith("HP") || prm.getSubProfile().endsWith("HC")) {
-            return "HPHC";
-        } else if (prm.getSubProfile().contains("HP") || prm.getSubProfile().contains("HC")) {
-            return "SAISON";
-        } else {
-            throw new BusinessException("Not-supported sub-profile "+prm.getSubProfile()+" for "+prm.getReference());
-        }
-    }
-
-    private Double getPrmPS(Prm prm) {
-        try {
-            EnedisContractualData enedisContractualData = enedisContractualDataService.getEntityManager()
-                    .createQuery(
-                            "select ecd from EnedisContractualData ecd " +
-                                    "left join fetch ecd.contractualSituations " +
-                                    "where ecd.prm.id = :prmId",
-                            EnedisContractualData.class)
-                    .setParameter("prmId", prm.getId())
-                    .setMaxResults(1)
-                    .getSingleResult();
-
-            List<ContractualSituation> situations = enedisContractualData.getContractualSituations();
-            if (!situations.isEmpty()) {
-                double ps = situations.get(0).getSubscribedPowerValue();
-                if (situations.get(0).getSubscribedPowerUnit().equalsIgnoreCase("kVA")) {
-                    return ps / 1000;
-                }
-            }
-
-            return null;
-        } catch (NoResultException e) {
-            log.info("No contractual data found for PRM with ID: {}", prm.getId());
-            return null;
-        } catch (Exception e) {
-            log.info("No subscribed power found for PRM with ID: {} ({})", prm.getId(), e.getMessage());
             return null;
         }
     }
 
-    private void getFuds(Prm prm, List<BilledMeterReading> bmrList) {
-        List<BilledMeterReading> filteredBmrList = bmrList.stream()
-                .filter(bmr -> bmr != null && Boolean.TRUE.equals(bmr.getOverwriteMeasure()))
-                .collect(Collectors.toList());
+    public Cdc(Curve curve, List<Double> puissances) {
+        StepEnum decuctedStep = getStepFromDatesAndValues(curve.getStartDate(), curve.getEndDate(), puissances);
+        if(decuctedStep != null && decuctedStep != curve.getStep()) {
+            this.cdcPas = decuctedStep;
+            curve.setStep(decuctedStep);
+        }
+        remplirCdc(curve.getStep(), curve.getStartDate(), curve.getEndDate());
+        this.curve = curve;
+        cdcPuissances = puissances;
+    }
 
-        if(filteredBmrList.isEmpty()) {
+    public Cdc(StepEnum pas, ZonedDateTime debut, ZonedDateTime fin) {
+        if (debut.isAfter(fin) || (debut.isEqual(fin) && (pas != StepEnum.Journalier))) {
+            return;
+        }
+        remplirCdc(pas, debut, fin);
+    }
+
+    public Cdc(StepEnum pas, ZonedDateTime debut, ZonedDateTime fin, Double defaultValue) {
+        if (debut.isAfter(fin) || (debut.isEqual(fin) && (pas != StepEnum.Journalier))) {
+            return;
+        }
+        remplirCdc(pas, debut, fin, defaultValue);
+    }
+
+    /** Remplit avec zéros ou NaN selon {@code avecNaN}. */
+    public Cdc(StepEnum pas, ZonedDateTime debut, ZonedDateTime fin, boolean avecNaN) {
+        remplirCdc(pas, debut, fin, avecNaN ? null : 0.0);
+    }
+
+    public Cdc projectCdc(ZonedDateTime debut, ZonedDateTime fin, StepEnum targetPas) {
+        return projectCdc(debut, fin, targetPas, false);
+    }
+
+    /**
+     * Étend (ou restreint) la courbe à une nouvelle plage temporelle.
+     * Si avecNaN=true, les zones sans données sont remplies de NaN.
+     * Port fidèle de EtendreCourbe(debut, fin, pas, avecMinValue) C#.
+     */
+    public Cdc projectCdc(ZonedDateTime debut, ZonedDateTime fin, StepEnum targetPas, boolean avecNaN) {
+        if (debut == null || fin == null) return this;
+
+        // Raccourci si aucun changement
+        if (this.cdcPas == targetPas && debut.equals(this.cdcDateDebut) && fin.equals(this.cdcDateFin)) {
+            return recopier();
+        }
+
+        Cdc retour = new Cdc(targetPas, debut, fin, avecNaN);
+        if (retour == null || retour.cdcDates == null) return null;
+
+        int i = 0, j = 0;
+
+        // Avancer i jusqu'à ce que retour.cdcDates[i] >= this.cdcDateDebut
+        while (i < retour.cdcDates.size() && retour.cdcDates.get(i).isBefore(this.cdcDateDebut)) {
+            i++;
+        }
+        // Avancer j jusqu'à ce que this.cdcDates[j] >= retour.cdcDates[i]
+        while (j < this.cdcDates.size() && i < retour.cdcDates.size()
+                && this.cdcDates.get(j).isBefore(retour.cdcDates.get(i))) {
+            j++;
+        }
+        // Copier les puissances
+        while (i < retour.cdcPuissances.size() && j < this.cdcPuissances.size()) {
+            retour.cdcPuissances.set(i, this.cdcPuissances.get(j));
+            j++;
+            i++;
+        }
+        return retour;
+    }
+
+    public void extendCdc(ZonedDateTime debut, ZonedDateTime fin, Double defaultValue) {
+        if(debut.isEqual(cdcDateDebut) && fin.isEqual(cdcDateFin)) {
             return;
         }
 
-        Double ps = getPrmPS(prm);
+        ZonedDateTime startDate = cdcDateDebut.isBefore(debut) || cdcDateDebut.isEqual(debut) ? cdcDateDebut : debut;
+        ZonedDateTime endDate = cdcDateFin.isAfter(fin) || cdcDateFin.isEqual(fin) ? cdcDateFin : fin;
 
-        if (ps == null) {
-            return;
-        }
+        // cdcDates and cdcPuissances are known arraylists the method, should extend these arrays based on the debut and fin parameters
+        // so we will have new dates at the begind and/or the end of the cdcDates and the defaultValue in cdcPuissances
+        List<ZonedDateTime> newDates = new ArrayList<>();
+        List<Double> newValues = new ArrayList<>();
+        int stepDurationInMin = cdcPas.getDurationInMinutes();
 
-        filteredBmrList.forEach(bmr -> {
-            String subProfile = getSubProfile(prm, bmr.getTemporalClass());
-            Double theta = THETA_VALUES.get(subProfile);
-            if (theta == null) {
-                log.info("Theta value not found for sub-profile {}, prm {}", subProfile, prm.getReference());
-                warnCounter.incrementAndGet();
-                report.rep(String.format("Valeur de theta non trouvée pour le sous-profil %s, prm %s", subProfile, prm.getReference()));
-                return;
+        // Add entries at the beginning if needed
+        if (startDate.isBefore(cdcDateDebut)) {
+            // Calculate how many entries needed and preallocate
+            ZonedDateTime currentDate = startDate;
+
+            while (currentDate.isBefore(cdcDateDebut)) {
+                newDates.add(currentDate);
+                newValues.add(defaultValue);
+                currentDate = cdcPas == StepEnum.Journalier ?
+                         currentDate.plusDays(1) : currentDate.plusMinutes(stepDurationInMin);
             }
-            bmr.setFudMeasure(BigDecimal.valueOf(ps).multiply(BigDecimal.valueOf(theta)).doubleValue());
-            bmrService.update(bmr, jobUser);
+
+            // Efficiently add all existing entries at once
+            newDates.addAll(cdcDates);
+            newValues.addAll(cdcPuissances);
+
+            // Replace the original lists
+            cdcDates = newDates;
+            cdcPuissances = newValues;
+        } else {
+            // If no prepending needed, just prepare for appending
+            newDates.addAll(cdcDates);
+            newValues.addAll(cdcPuissances);
+        }
+
+        // Add entries at the end if needed
+        if (endDate.isAfter(cdcDateFin)) {
+            // Start from the next hour after the current end
+            ZonedDateTime currentDate = cdcPas == StepEnum.Journalier ?
+                    cdcDateFin.plusDays(1) : cdcDateFin.plusMinutes(stepDurationInMin);
+
+            while (!currentDate.isAfter(endDate)) {
+                newDates.add(currentDate);
+                newValues.add(defaultValue);
+                currentDate = cdcPas == StepEnum.Journalier ?
+                        currentDate.plusDays(1) : currentDate.plusMinutes(stepDurationInMin);
+            }
+        }
+
+        cdcDates = newDates;
+        cdcPuissances = newValues;
+        setStartEndDates();
+    }
+
+    private void remplirCdc(StepEnum pas, ZonedDateTime debut, ZonedDateTime fin) {
+        remplirCdc(pas, debut, fin, 0D);
+    }
+
+    public Cdc getReducedCdc(ZonedDateTime start, ZonedDateTime end) {
+        Cdc reducedCdc = new Cdc();
+        int startIndex = getReducedStartDateIndex(start);
+        int endIndex = getReducedEndDateIndex(end);
+
+        reducedCdc.curve = new Curve();
+        reducedCdc.curve.setStartDate(start);
+        reducedCdc.curve.setEndDate(end);
+        reducedCdc.curve.setStep(cdcPas);
+        reducedCdc.curve.setBinaryCurve(new BinaryCurve());
+        reducedCdc.curve.getBinaryCurve().setCurve(reducedCdc.curve);
+        reducedCdc.curve.getBinaryCurve().setData(convertDoublesToBytes(reducedCdc.cdcPuissances));
+
+        reducedCdc.cdcDates = new ArrayList<>(cdcDates.subList(startIndex, endIndex + 1));
+        reducedCdc.cdcPuissances = new ArrayList<>(cdcPuissances.subList(startIndex, endIndex + 1));
+        reducedCdc.cdcDateDebut = start;
+        reducedCdc.cdcDateFin = end;
+        reducedCdc.cdcPas = cdcPas;
+
+        return reducedCdc;
+    }
+
+    public CoverageStatus getCoverageStatus(ZonedDateTime start, ZonedDateTime end) {
+
+        int startIndex = getReducedStartDateIndex(start);
+        int endIndex   = getReducedEndDateIndex(end);
+
+        long expectedPoints = Duration.between(start, end).toMinutes() / cdcPas.getDurationInMinutes() + 1;
+
+        if (startIndex < 0 || endIndex < startIndex) {
+            return CoverageStatus.NONE;
+        }
+
+        List<Double> slice = cdcPuissances.subList(startIndex, endIndex + 1);
+
+        boolean hasAtLeastOne = slice.stream().anyMatch(v -> v != null);
+        if (!hasAtLeastOne) {
+            return CoverageStatus.NONE;
+        }
+
+        boolean allCovered = slice.stream().allMatch(v -> v != null) && slice.size() == expectedPoints;
+
+        return allCovered ? CoverageStatus.FULL : CoverageStatus.PARTIAL;
+    }
+
+
+    public enum CoverageStatus {
+        NONE,
+        PARTIAL,
+        FULL
+    }
+
+    public static Cdc sumCdcs(Cdc... cdcs){
+        return sumCdcs(List.of(cdcs));
+    }
+
+    public void incrementValue(Double value) {
+        cdcPuissances.replaceAll(v -> v != null ? v + value : null);
+    }
+
+    public static Cdc sumAndExtendCdcs(List<Cdc> cdcList) {
+        ZonedDateTime minStartDate = cdcList.stream().map(Cdc::getCdcDateDebut).min(ZonedDateTime::compareTo).orElseThrow(() -> new BusinessException("No start date found"));
+        ZonedDateTime maxEndDate = cdcList.stream().map(Cdc::getCdcDateFin).max(ZonedDateTime::compareTo).orElseThrow(() -> new BusinessException("No end date found"));
+
+        for(Cdc cdc : cdcList) {
+            cdc.extendCdc(minStartDate, maxEndDate, null);
+        }
+
+        return sumCdcs(cdcList);
+    }
+
+    public void applyMethod(Function<Double, Double> method) {
+        cdcPuissances.replaceAll(v -> v != null ? method.apply(v) : null);
+    }
+
+    public void applyMethod(Cdc cdc, BiFunction<Double, Double, Double> method) {
+        if(cdc.getCdcPuissances().size() != cdcPuissances.size()) {
+            throw new BusinessException("Cdcs have different sizes, cannot apply method");
+        }
+
+        IntStream.range(0, cdcPuissances.size()).forEach(i -> {
+            Double v1 = cdcPuissances.get(i);
+            Double v2 = cdc.getCdcPuissances().get(i);
+            cdcPuissances.set(i, method.apply(v1, v2));
+        });
+    }
+
+    public ZonedDateTime getLastNonNullValueDate(){
+        for(int i = cdcPuissances.size() - 1; i >= 0; i--) {
+            if(cdcPuissances.get(i) != null) {
+                return cdcDates.get(i).withHour(0).withMinute(0);
+            }
+        }
+        throw new BusinessException("No non-null value found in the CDC");
+    }
+
+    public static Cdc sumCdcs(List<Cdc> cdcList){
+        if(cdcList.isEmpty()) {
+            throw new BusinessException("No Cdcs to sum");
+        }
+
+        Cdc firstCdc = cdcList.get(0);
+        for(Cdc cdc : cdcList) {
+            if(!firstCdc.getCdcDateDebut().isEqual(cdc.getCdcDateDebut()) || !firstCdc.getCdcDateFin().isEqual(cdc.getCdcDateFin()) || firstCdc.getCdcPas() != cdc.getCdcPas()) {
+                throw new BusinessException("Cdcs have different start/end dates or steps");
+            }
+        }
+
+        Cdc sumCdc = new Cdc(firstCdc.getCdcPas(), firstCdc.getCdcDateDebut(), firstCdc.getCdcDateFin(), null);
+        IntStream.range(0, sumCdc.getCdcPuissances().size()).parallel().forEach(index -> {
+            double sum = 0D;
+            for (Cdc cdc : cdcList) {
+                sum += ofNullable(cdc.getCdcPuissances().get(index)).orElse(0D);
+            }
+            sumCdc.getCdcPuissances().set(index, sum);
         });
 
-        filteredBmrList.clear();
+        return sumCdc;
     }
 
-    // Filtrer sur les PRMs C5
-    private void processRfp(Long rfpId) throws BusinessException, ObjectNotFoundException {
-        Rfp rfp = rfpService.findById(rfpId);
+    public void reduceCdc(ZonedDateTime start, ZonedDateTime end) {
+        extendCdc(start, end, null);
 
-        if (rfp == null) {
-            throw new ObjectNotFoundException("RFP non trouvé : " + rfpId);
-        }
+        int startIndex = getReducedStartDateIndex(start);
+        int endIndex = getReducedEndDateIndex(end);
 
-        List<Prm> prmsToProcess = rfpDetailService.getPrmsByRfpAndSegment(rfp.getId(), "C5");
-        processPrms(prmsToProcess);
+        cdcDates = cdcDates.subList(startIndex, endIndex + 1);
+        cdcPuissances = cdcPuissances.subList(startIndex, endIndex + 1);
+        setStartEndDates();
+        cdcDateDebut = start;
+        cdcDateFin = end;
+        curve.setStartDate(start);
+        curve.setEndDate(end);
     }
 
-
-    private void handleMeterReadingList(Prm prm, String targetClassCat, Map<String, Cdc> cdcMap, Map<String, Cdc> profileMap, MeterReadingList meterReadingList) {
-        List<String> targetClasses = getTargetClasses(targetClassCat);
-
-        // report.rep("[4] PRM Reference | Sub-profile | EP | Coeff sum | FU (Ep/coeffSum) | start | end");
-
-        log.debug("PRM Reference | Sub-profile | FU (Ep/coeffSum) | Coeff sum | start | end");
-        meterReadingList.getList()//.stream().parallel()
-                .forEach(m -> handleUnitMR(prm, cdcMap, m, targetClasses, profileMap));
-    }
-
-    private void handleUnitMR(Prm prm, Map<String, Cdc> cdcMap, MeterReading mr, List<String> targetClasses, Map<String, Cdc> profileMap) {
-        if (!validateMeterReading(mr)) {
-            warnCounter.incrementAndGet();
-            report.rep(String.format("Classes temporelles manquantes pour le prm %s sur la période %s - %s : %s",
-                    prm.getReference(),
-                    mr.getStartDate().format(DATE_FORMATTER),
-                    mr.getEndDate().format(DATE_FORMATTER),
-                    getMissingTempClasses(mr, targetClasses)));
-            return;
-        }
-        targetClasses.stream().parallel().forEach(tempClassTarget -> {
-            try {
-                handleMeterReading(prm, mr, cdcMap, tempClassTarget, profileMap);
-            } catch (ProfileCoeffNotFound e) {
-                log.info("Profile not found for PRM {}, temporal class {} and period {} to {}",
-                        prm.getReference(), tempClassTarget,
-                        mr.getStartDate().format(DATE_FORMATTER), mr.getEndDate().format(DATE_FORMATTER));
-            } catch (Exception e) {
-                throw e;
-            }
-        });
-    }
-
-    private String getMissingTempClasses(MeterReading mr, List<String> targetClasses) {
-        List<String> missingClasses = new ArrayList<>();
-        for (String targetClass : targetClasses) {
-            if (!mr.getBmrList().containsKey(targetClass)) {
-                missingClasses.add(targetClass);
+    public int getReducedStartDateIndex(ZonedDateTime start) {
+        for(int i = 0; i < cdcDates.size(); i++) {
+            if(cdcDates.get(i).isAfter(start) || cdcDates.get(i).isEqual(start)) {
+                return i;
             }
         }
-        return String.join(", ", missingClasses);
-
+        throw new BusinessException(
+                "Données non trouvées pour la courbe " + curve.getCurveType()
+                + ", date de début: " + start.format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"))
+        );
     }
 
-    private boolean validateMeterReading(MeterReading mr) {
-        String classCat = mr.getTemporalCat();
-
-        switch (classCat) {
-            case "HPHC":
-                return mr.getBmrList().size() == 2;
-            case "SAISON":
-                return mr.getBmrList().size() == 4;
-            default:
-                return true;
+    public int getReducedEndDateIndex(ZonedDateTime end) {
+        for(int i = cdcDates.size() - 1; i >= 0; i--) {
+            if(cdcDates.get(i).isBefore(end) || cdcDates.get(i).isEqual(end)) {
+                return i;
+            }
         }
+        throw new BusinessException(
+                "Données non trouvées pour la courbe " + curve.getCurveType()
+                + ", date de fin: " + end.format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"))
+        );
     }
 
-    private void saveCurves(Prm prm, Map<String, Cdc> cdcMap, String targetClassCat) {
-        Map<String, BilledCurve> bcMap = billedCurveService.getEntityManager().createQuery("select bc from BilledCurve bc " +
-                        "where bc.prm = :prm and bc.curve.curveTypeId = :getC5lisse", BilledCurve.class)
-                .setParameter("prm", prm)
-                .setParameter("getC5lisse", getCurveTypeEnum().getId())
-                .getResultList().stream()
-                .collect(Collectors.toMap(BilledCurve::getTemporalClass, bc -> bc));
-        for (Map.Entry<String, Cdc> entryCdc : cdcMap.entrySet()) {
-            if (bcMap.get(entryCdc.getKey()) != null && getTemporalCat(entryCdc.getKey()).equals(targetClassCat)) {
-                Cdc bcCdc = new Cdc(bcMap.get(entryCdc.getKey()).getCurve());
-                bcCdc.mergeCdcAndIgnoreDiscontinuity(entryCdc.getValue());
-                bcCdc.getCurve().getBinaryCurve().setData(Cdc.convertDoublesToBytes(bcCdc.getCdcPuissances()));
-                bcMap.get(entryCdc.getKey()).setHistoricalAnnualEnergyVolume(bcCdc.calculateHistoricalAnnualEnergyVolume());
+    public int getDateIndex(ZonedDateTime date) {
+        if(!(date.isBefore(cdcDateDebut) || date.isAfter(cdcDateFin))) {
+            for(int i = 0; i < cdcDates.size(); i++) {
+                if(cdcDates.get(i).isEqual(date)) {
+                    return i;
+                }
+            }
+        }
+        throw new BusinessException("Date not found in the CDC");
+    }
 
-                curveService.update(bcCdc.getCurve(), jobUser);
-                billedCurveService.update(bcMap.get(entryCdc.getKey()), jobUser);
+    public boolean hasMinimumHistory(){
+        return cdcDateFin.isAfter(cdcDateDebut.plusYears(1));
+    }
+
+    public Long countIf(Double value, ZonedDateTime start, ZonedDateTime end) {
+        int startIndex = getReducedStartDateIndex(start);
+        int endIndex = getReducedEndDateIndex(end);
+
+        return cdcPuissances.subList(startIndex, endIndex + 1)
+                .stream().filter(v -> Objects.equals(v, value))
+                .count();
+    }
+
+    public Long count(ZonedDateTime start, ZonedDateTime end, boolean ignoreNulls) {
+        int startIndex = getReducedStartDateIndex(start);
+        int endIndex = getReducedEndDateIndex(end);
+
+        return cdcPuissances.subList(startIndex, endIndex + 1)
+                .stream().filter(v -> !ignoreNulls || v != null)
+                .count();
+    }
+
+    public Long count(ZonedDateTime start, ZonedDateTime end) {
+        return count(start, end, false);
+    }
+
+    public Long count(boolean ignoreNulls){
+        return count(cdcDateDebut, cdcDateFin, ignoreNulls);
+    }
+
+    public Long count(){
+        return count(false);
+    }
+
+    public Long countIf(Double value) {
+        return cdcPuissances.stream().filter(v -> Objects.equals(v, value)).count();
+    }
+
+    public Long countIfLastYear(Double value) {
+        return countIf(value, cdcDateFin.minusYears(1), cdcDateFin);
+    }
+
+    public Double getSum() {
+        return cdcPuissances.stream().filter(Objects::nonNull).mapToDouble(Double::doubleValue).sum();
+    }
+
+    public Double getSum(ZonedDateTime start, ZonedDateTime end) {
+        int startIndex = getReducedStartDateIndex(start);
+        int endIndex = getReducedEndDateIndex(end);
+
+        return cdcPuissances.subList(startIndex, endIndex + 1)
+                .stream().filter(Objects::nonNull)
+                .mapToDouble(Double::doubleValue)
+                .sum();
+    }
+
+    public Double getSumLastYear() {
+        return getSum(cdcDateFin.minusYears(1), cdcDateFin);
+    }
+
+    public Double getAverage(boolean ignoreNulls) {
+        return getSum() / cdcPuissances.stream().filter(v -> !ignoreNulls || v != null).count();
+    }
+
+    public Double getAverage() {
+        return getAverage(true);
+    }
+
+    public Double getPeakAverage(boolean ignoreNulls) {
+
+        return IntStream.range(0, cdcPuissances.size())
+                .filter(i -> (!ignoreNulls || cdcPuissances.get(i) != null) && isPeakHour(cdcDates.get(i)))
+                .mapToObj(i -> cdcPuissances.get(i))
+                .mapToDouble(Double::doubleValue)
+                .average().orElse(0);
+    }
+
+    public Double getPeakAverage() {
+        return getPeakAverage(true);
+    }
+
+    public Double getOffPeakAverage(boolean ignoreNulls) {
+        return IntStream.range(0, cdcPuissances.size())
+                .filter(i -> (!ignoreNulls || cdcPuissances.get(i) != null) && !isPeakHour(cdcDates.get(i)))
+                .mapToObj(i -> cdcPuissances.get(i))
+                .mapToDouble(Double::doubleValue)
+                .average().orElseThrow(() -> new BusinessException("No off-peak data found"));
+    }
+
+    public Double getOffPeakAverage() {
+        return getOffPeakAverage(true);
+    }
+
+    public static boolean isPeakHour(ZonedDateTime date) {
+        int hour = date.withZoneSameInstant(currentZoneId).getHour();
+        int dayOfWeek = date.withZoneSameInstant(currentZoneId).getDayOfWeek().getValue();
+        return (hour >= 8 && hour < 20 && dayOfWeek >= 1 && dayOfWeek <= 5);
+    }
+
+    public void divideByCdc(Cdc cdc){
+        // unify dates
+        cdc.extendCdc(cdcDateDebut, cdcDateFin, null);
+
+        for(int i = 0; i < cdcPuissances.size(); i++) {
+            if(cdcPuissances.get(i) != null && cdc.cdcPuissances.get(i) != null && cdc.cdcPuissances.get(i) != 0) {
+                cdcPuissances.set(i, cdcPuissances.get(i) / cdc.cdcPuissances.get(i));
             } else {
-                if (bcMap.get(entryCdc.getKey()) != null) {
-                    billedCurveService.deletePrmCurveByTC(prm, entryCdc.getKey());
-                }
-                BilledCurve bc = new BilledCurve();
-                bc.setPrm(prm);
-                bc.setTemporalClass(entryCdc.getKey());
-                entryCdc.getValue().getCurve().getBinaryCurve().setData(Cdc.convertDoublesToBytes(entryCdc.getValue().getCdcPuissances()));
-                bc.setHistoricalAnnualEnergyVolume(entryCdc.getValue().calculateHistoricalAnnualEnergyVolume());
-                // Grouper les 2 opérations de création dans une seule transaction
-                curveService.create(entryCdc.getValue().getCurve(), jobUser);
-                bc.setCurve(entryCdc.getValue().getCurve());
-                billedCurveService.create(bc, jobUser);
+                cdcPuissances.set(i, null);
             }
         }
-        bcMap.forEach((k, v) -> {
-            if (!cdcMap.containsKey(k)) {
-                billedCurveService.deletePrmCurveByTC(prm, k);
-            }
-        });
-        bcMap.clear();
     }
 
-    private void handleMeterReading(Prm prm, MeterReading mr, Map<String, Cdc> cdcMap, String tempClassTarget, Map<String, Cdc> profileMap) throws ProfileCoeffNotFound {
-        String subProfile = getSubProfile(prm, tempClassTarget);
-        Cdc cdc = cdcMap.getOrDefault(tempClassTarget, null);
+    public void multiplyBy(Double factor) {
+        cdcPuissances.replaceAll(v -> v != null ? v * factor : null);
+    }
 
-        Cdc profileCdc = loadProfileData(subProfile, profileMap);
-        Cdc profileData;
+    private void remplirCdc(StepEnum pas, ZonedDateTime debut, ZonedDateTime fin, Double defaultValue) {
         try {
-            ZonedDateTime startDate = mr.getStartDate();
-            ZonedDateTime endDate = mr.getStartDate().isEqual(mr.getEndDate()) ?
-                    mr.getEndDate().plusDays(1).minusMinutes(StepEnum.Horaire.getDurationInMinutes()) :
-                    mr.getEndDate().minusMinutes(StepEnum.Horaire.getDurationInMinutes());
-            if (startDate.isBefore(profileCdc.getCdcDateDebut()) || endDate.isAfter(profileCdc.getCdcDateFin())) {
-                throw new ProfileCoeffNotFound("Date de début ou de fin non trouvée dans le profil");
-            }
+            int nbPoints = calculerNbPoints(pas, debut, fin);
 
-            profileData = profileCdc.getReducedCdc(startDate, endDate);
-
-            if(profileData.countIf(null) > 0) {
-                throw new ProfileCoeffNotFound("Le sous-profil contient des valeurs nulles");
+            if (nbPoints > 0) {
+                cdcDates = new ArrayList<>(nbPoints);
+                cdcPuissances = new ArrayList<>(Collections.nCopies(nbPoints, defaultValue));
+                cdcDateDebut = debut.withZoneSameInstant(currentZoneId);
+                cdcDateFin = fin.withZoneSameInstant(currentZoneId);
+                cdcPas = pas;
+                reconstruireDates(nbPoints);
             }
+            initCurve();
         } catch (Exception e) {
-            log.error("Profile coeff not found for sub-profile {}", subProfile, e);
-            throw new ProfileCoeffNotFound(e.getMessage());
-        }
-
-        CurveTypeEnum curveTypeEnum = getCurveTypeEnum();
-        profileData.getCurve().setCurveType(curveTypeEnum);
-        profileData.getCurve().setDescription(curveTypeEnum.name());
-
-        Double eP = mr.getEp(tempClassTarget, subProfileCoefficients);
-        Double coeffSum = profileData.getSum();
-        Double fu = coeffSum == 0 ? 0D : eP / coeffSum;
- //       if(mr.getStartDate().toLocalDateTime().isAfter(LocalDateTime.of(2024, 7,30, 0, 0, 0))){
-      //      report.rep(prm.getReference() + " | " + subProfile + " | " + eP + " | " + coeffSum + " | " + fu + " | " + mr.getStartDate().toLocalDate() + " | " + mr.getEndDate().toLocalDate());
-  //      }
-        log.debug("{} | {} | {} | {} | {} | {}", prm.getReference(), subProfile, fu, coeffSum, mr.getStartDate(), mr.getEndDate());
-        // report.rep("valeur de la courbe AVANT multiplication, de l'heure : " + profileData.getCdcDates().get(3).toLocalDateTime() + " est " + profileData.getCdcPuissances().get(3));
-        profileData.multiplyBy(fu);
-        // report.rep("valeur de la courbe APRES multiplication, de l'heure : " + profileData.getCdcDates().get(3).toLocalDateTime() + " est " + profileData.getCdcPuissances().get(3));
-        if (cdc == null) {
-            cdcMap.put(tempClassTarget, profileData);
-        } else {
-            cdcMap.get(tempClassTarget).mergeCdcAndIgnoreDiscontinuity(profileData);
-            cdcMap.get(tempClassTarget).getCurve().getBinaryCurve().setData(
-                    Cdc.convertDoublesToBytes(cdcMap.get(tempClassTarget).getCdcPuissances()));
+            throw new BusinessException(e);
         }
     }
 
-    @NotNull
-    private CurveTypeEnum getCurveTypeEnum() {
-        return C5_LISSE_DISABLED.equals(getC5Lisse) ? CurveTypeEnum.CDC_PROFILE : CurveTypeEnum.CDC_PROFILE_LISSE;
-    }
-
-    private Cdc loadProfileData(String subProfile, Map<String, Cdc> profileMap) {
-        if (profileMap.containsKey(subProfile)) {
-            return profileMap.get(subProfile);
+    public Duration calculerIntervalle(StepEnum pas) {
+        Duration interval = null;
+        switch (pas) {
+            case Horaire:
+                interval = Duration.ofHours(1);
+                break;
+            case SemiHoraire:
+                interval = Duration.ofMinutes(30);
+                break;
+            case DixMinutes:
+                interval = Duration.ofMinutes(10);
+                break;
+            case CinqMinutes:
+                interval = Duration.ofMinutes(5);
+                break;
+            case Journalier:
+                interval = Duration.ofDays(1);
+                break;
+            // TODO : add monthly step
+//            case Mensuel:
+//                interval = Duration.ofDays(31);
+//                break;
         }
+        return interval;
+    }
 
-        try {
-            final List<Curve>[] curves = new List[]{curveService.getEntityManager().createQuery("select c from Curve c " +
-                            "where c.description = :descriptionAjuste or c.description = :descriptionDynamique", Curve.class)
-                    .setParameter("descriptionAjuste", subProfile.toUpperCase() + "_COEFF_AJUSTE")
-                    .setParameter("descriptionDynamique", subProfile.toUpperCase() + "_COEFF_DYNAMIQUE")
-                    .setMaxResults(2)
-                    .getResultList()};
-
-            final Cdc[] adjustedCdc = new Cdc[1];
-            final Cdc[] dynamicCdc = new Cdc[1];
-
-            curves[0].forEach(curve -> {
-                curveService.getEntityManager().detach(curve);
-                if (curve.getDescription().endsWith("_AJUSTE")) {
-                    adjustedCdc[0] = new Cdc(curve.getStep(), curve.getStartDate(), curve.getEndDate(), null);
-                    adjustedCdc[0].setCdcPuissances(Cdc.convertBytesToDoubles(curve.getBinaryCurve().getData()));
-                    adjustedCdc[0] = Cdc.changerPas(adjustedCdc[0], StepEnum.Horaire);
-                } else if (curve.getDescription().endsWith("_DYNAMIQUE")) {
-                    dynamicCdc[0] = new Cdc(curve.getStep(), curve.getStartDate(), curve.getEndDate(), null);
-                    dynamicCdc[0].setCdcPuissances(Cdc.convertBytesToDoubles(curve.getBinaryCurve().getData()));
-                    dynamicCdc[0] = Cdc.changerPas(dynamicCdc[0], StepEnum.Horaire);
-                }
-            });
-
-            adjustedCdc[0].mergeCdcAndIgnoreDiscontinuity(dynamicCdc[0]);
-
-            profileMap.put(subProfile, adjustedCdc[0]);
-            return adjustedCdc[0];
-        } catch (Exception e) {
-            log.error("Profile coeff not found for sub-profile {}", subProfile, e);
-            throw new ProfileCoeffNotFound("Profile coeff not found for sub-profile " + subProfile);
+    public static int calculerNbPtsParHeure(StepEnum pas) {
+        int n = 0;
+        switch (pas) {
+            case Horaire:
+            case Journalier:
+            // TODO : add monthly step
+//            case Mensuel:
+                n = 1;
+                break;
+            case SemiHoraire:
+                n = 2;
+                break;
+            case QuinzeMinutes:
+                n = 4;
+                break;
+            case CinqMinutes:
+                n = 12;
+                break;
+            case DixMinutes:
+                n = 6;
+                break;
         }
+        return n;
     }
 
-    private List<BilledMeterReading> getBilledMeterReadings(Prm prm) {
-        return bmrService.getEntityManager().createQuery("select bmr from BilledMeterReading bmr " +
-                        "where bmr.prm.id = :prmId and bmr.calendar = :calendar and bmr.measureName != :estimated " +
-                        " and bmr is not null " +
-                        "order by bmr.startDate asc", BilledMeterReading.class)
-                .setParameter("prmId", prm.getId())
-                .setParameter("calendar", DEFAULT_CALENDAR)
-                .setParameter("estimated", "Estimé")
-                .getResultList();
-    }
+    // set dates of cdcDates as the first value is the start date and the last one in end date
+    // and the rest are calculated based on the step
+    // handle also the case of the daylight saving time
+    public void reconstruireDates(){
+        StepEnum pas = cdcPas;
+        ZonedDateTime dateCourante = cdcDateDebut;
+        cdcDates = new ArrayList<>();
+        while (dateCourante.isBefore(cdcDateFin) || dateCourante.isEqual(cdcDateFin)) {
+            cdcDates.add(dateCourante);
 
-    private void retrieveConfiguration() {
-        correlationTable = correlationTableService.list();
-        subProfileCoefficients = subProfileCoefficientService.list();
-    }
-
-    /*  Utility methods */
-    private List<String> getTargetClasses(String targetClassCat) {
-        switch (targetClassCat) {
-            case "HPHC":
-                return MeterReading.HPHC_CLASSES;
-            case "SAISON":
-                return MeterReading.SAISON_CLASSES;
-            default:
-                return List.of("BASE");
-        }
-    }
-
-    private String getSubProfile(Prm prm, String temporalClass) {
-        if (prm.getSubProfile() != null && !prm.getSubProfile().isBlank() && prm.getSubProfile().contains("BASE")) {
-            return prm.getSubProfile();
-        }
-
-        List<Long> pro5 = prmIdsByPoste.get("PRO5");
-        if(temporalClass.equals("BASE") && pro5 != null && pro5.contains(prm.getId())){
-            return "PRO5_BASE";
-        }
-
-        String mrType = temporalClass.length() == 3 && temporalClass.endsWith("B") ?
-                temporalClass.substring(0, 2) + "E" : temporalClass;
-
-        return getSubProfileMapping(mrType);
-    }
-
-    private String getSubProfileMapping(String meterReadingType) {
-        final String mrType = meterReadingType.length() == 3 && meterReadingType.endsWith("B") ?
-                meterReadingType.substring(0, 2) + "E" : meterReadingType;
-
-        return correlationTable.stream()
-                .filter(correlation -> correlation.getMeterReadingType().equals(mrType))
-                .map(CorrelationTable::getSubProfile)
-                .findFirst()
-                .orElseThrow(() -> new BusinessException("Mapping non trouvé pour le type de relève " + mrType));
-    }
-
-    private void validateParams(Map<String, Object> methodContext) {
-        String prmRefsParam = methodContext.getOrDefault(PRM_REFS_PARAM, "").toString().trim();
-        String rfpIdsParam = methodContext.getOrDefault(RFP_IDS_PARAM, "").toString().trim();
-        String threadCountParam = methodContext.getOrDefault(THREAD_COUNT_PARAM, "").toString().trim();
-        String memoryLimitParam = methodContext.getOrDefault(MEMORY_LIMIT_PARAM, "").toString().trim();
-        getC5Lisse = methodContext.getOrDefault(C5_LISSE, C5_LISSE_DISABLED).toString().trim();
-        if(!threadCountParam.isBlank()){
-            try {
-                threadCount = Integer.parseInt(threadCountParam);
-                if (threadCount <= 0) {
-                    throw new BusinessException("Le nombre de threads doit être supérieur à 0");
-                }
-            } catch (NumberFormatException e) {
-                throw new BusinessException("Le paramètre 'threadCount' doit être un entier valide");
+            if(pas != StepEnum.Journalier) {
+                dateCourante = dateCourante.plusMinutes(pas.getDurationInMinutes());
+            } else {
+                dateCourante = dateCourante.plusDays(1).withHour(0).withMinute(0);
             }
         }
-
-        if(!memoryLimitParam.isBlank()){
-            try {
-                memoryLimit = Double.parseDouble(memoryLimitParam);
-                if (memoryLimit <= 0) {
-                    throw new BusinessException("Le paramètre 'memoryLimit' doit être un nombre positif");
-                }
-            } catch (NumberFormatException e) {
-                throw new BusinessException("Le paramètre 'memoryLimit' doit être un nombre valide");
-            }
-        }
-
-        if(automaticJobLaunch) {
-            profilingType = ProfilingTypeEnum.DEFAULT;
-            return;
-        }
-
-        if (!prmRefsParam.isBlank() && !rfpIdsParam.isBlank()) {
-            throw new BusinessException("Sélectionner un unique champ PRM ou AO");
-        }
-
-        if (!prmRefsParam.isBlank()) {
-            prmRefs = getStringList(prmRefsParam);
-            profilingType = ProfilingTypeEnum.PRM;
-        }
-
-        if (!rfpIdsParam.isBlank()) {
-            rfpIds = getLongList(rfpIdsParam);
-            profilingType = ProfilingTypeEnum.RFP;
-        }
     }
 
-    private List<String> getStringList(String curveIds) {
-        return Stream.of(curveIds.split(SEMI_COLON)).collect(Collectors.toList());
-    }
-
-    private List<Long> getLongList(String curveIds) {
-        return Stream.of(curveIds.split(SEMI_COLON))
-                .map(strCurveId -> {
-                    try {
-                        return Long.parseLong(strCurveId);
-                    } catch (NumberFormatException e) {
-                        throw new BusinessException("ID invalide " + strCurveId);
+    public void reconstruireDates(int n){
+        cdcDates = IntStream.range(0, n).parallel()
+                .mapToObj(i -> {
+                    if(cdcPas != StepEnum.Journalier) {
+                        return cdcDateDebut.plusMinutes((long) i * cdcPas.getDurationInMinutes());
+                    } else {
+                        return cdcDateDebut.plusDays(i).withHour(0).withMinute(0);
                     }
                 })
-                .collect(Collectors.toList());
+                .collect(Collectors.toCollection(() -> new ArrayList<>(n)));
+
+        cdcDateFin = cdcDates.get(cdcDates.size() - 1);
+        if(curve != null) {
+            curve.setEndDate(cdcDateFin);
+        }
     }
 
-    private synchronized void checkMemoryConsumption() {
-        long memoryUsed = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory())/1000000000;
+    public int calculerNbPoints(StepEnum pas, ZonedDateTime debut, ZonedDateTime fin) {
+        int division = 0;
+        int nbPoints;
+        int i = 0;
+        ZonedDateTime datecourante = debut;
+        switch (pas) {
+            case Horaire:
+                division = 24;
+                break;
+            case SemiHoraire:
+                division = 48;
+                break;
+            case QuinzeMinutes:
+                division = 96;
+                break;
+            case DixMinutes:
+                division = 144;
+                break;
+            case CinqMinutes:
+                division = 288;
+                break;
+            case Journalier:
+                long daysBetween = ChronoUnit.DAYS.between(debut, fin);
+                nbPoints = Math.round((float) daysBetween + 1);
+                return nbPoints;
+        }
 
-        if (memoryUsed > memoryLimit) {
-            if(gcLaunchTime == 0 || (System.currentTimeMillis() - gcLaunchTime) > GC_INTERVAL * 1000) {
-                log.info("Memory usage is high: {} Gb used out of {} Gb ... Forcing garbage collection", memoryUsed, MAX_MEMORY);
-                forceGarbageCollection();
-                gcLaunchTime = System.currentTimeMillis();
+        try {
+            ZonedDateTime dateDebut = ofNullable(debut).orElseThrow(() -> new BusinessException("Date de début non renseignée pour générer une CDC"));
+            ZonedDateTime dateFin = ofNullable(fin).orElseThrow(() -> new BusinessException("Date de fin non renseignée pour générer une CDC"));
+
+            float hours = (float) (dateFin.toEpochSecond()-dateDebut.toEpochSecond()) / 3600;
+            nbPoints = Math.round((hours * division) / 24) + 1;
+        } catch (Exception e) {
+
+            long differenceInMillis = ChronoUnit.MILLIS.between(debut, fin);
+            double differenceInDays = (double) differenceInMillis / (1000 * 60 * 60 * 24);
+            nbPoints = (int) Math.round(differenceInDays * division) + 1;
+
+            // On recherche le nombre d'heure à supprimer et à ajouter
+            while (datecourante.isBefore(fin)) {
+                if (isChgtHeureMars(datecourante))
+                    i--;
+                else if (isChgtHeureOctobre(datecourante))
+                    i++;
+                datecourante = datecourante.plusHours(1);
+            }
+            nbPoints += i * (division / 24);
+        }
+
+        return nbPoints;
+    }
+
+    private boolean isChgtHeureMars(ZonedDateTime date) {
+        return date.getDayOfWeek().getValue() == 7 && date.getMonth().getValue() == 3 && date.getDayOfMonth() > 24;
+    }
+
+    private boolean isChgtHeureOctobre(ZonedDateTime date) {
+        return date.getDayOfWeek().getValue() == 7 && date.getMonth().getValue() == 10 && date.getDayOfMonth() > 24;
+    }
+
+    private OffsetDateTime calculerDateDebutOffset(ZonedDateTime date, Duration offset, ZoneId timezone) {
+        date = date.minus(offset);
+        // Winter time
+        if (isChgtHeureOctobre(date.plus(offset)))
+            return OffsetDateTime.of(date.toLocalDateTime(), ZoneOffset.ofHours(2));
+            // Summer time
+        else if (isChgtHeureMars(date.plus(offset)))
+            return OffsetDateTime.of(date.toLocalDateTime(), ZoneOffset.ofHours(1));
+        return OffsetDateTime.of(date.toLocalDateTime(), ZoneId.systemDefault().getRules().getOffset(date.toLocalDateTime()));
+    }
+
+    private OffsetDateTime calculerDateFinOffset(ZonedDateTime date, Duration offset, ZoneId timezone) {
+        date = date.minus(offset);
+        // Winter time
+        if (isChgtHeureOctobre(date.plus(offset)))
+            return OffsetDateTime.of(date.toLocalDateTime(), ZoneOffset.ofHours(1));
+            // Summer time
+        else if (isChgtHeureMars(date.plus(offset)))
+            return OffsetDateTime.of(date.toLocalDateTime().minusMinutes(date.getMinute()).minus(offset), ZoneOffset.ofHours(1));
+        return OffsetDateTime.of(date.toLocalDateTime(), ZoneId.systemDefault().getRules().getOffset(date.toLocalDateTime()));
+    }
+
+    public static byte[] convertDoublesToBytes(List<Double> values) {
+        byte[] bytes = new byte[values.size() * Double.BYTES];
+        for (int i = 0; i < values.size(); i++) {
+            Double currentValue = values.get(i);
+            long value = currentValue != null ? Double.doubleToLongBits(currentValue) : Double.doubleToLongBits(Double.NaN);
+            for (int j = 0; j < Double.BYTES; j++) {
+                bytes[i * Double.BYTES + j] = (byte) ((value >> (j * 8)) & 0xFF);
+            }
+        }
+        return bytes;
+    }
+
+    public static List<Double> convertBytesToDoubles(byte[] bytes) {
+        List<Double> values = new ArrayList<>();
+        for (int i = 0; i < bytes.length; i += Double.BYTES) {
+            long value = 0L;
+            for (int j = 0; j < Double.BYTES; j++) {
+                value |= ((long) bytes[i + j] & 0xFF) << (j * 8);
+            }
+            double doubleValue = Double.longBitsToDouble(value);
+            if (Double.isNaN(doubleValue)) {
+                values.add(null);
             } else {
-                log.info("Garbage collection already launched in the last {} seconds", GC_INTERVAL);
+                values.add(doubleValue);
+            }
+        }
+        return values;
+    }
+
+    private StepEnum getStepEnum(ZonedDateTime start, ZonedDateTime end) {
+        long diff = start.toLocalDateTime().toInstant(OffsetTime.now().getOffset()).toEpochMilli()
+                - end.toLocalDateTime().toInstant(OffsetTime.now().getOffset()).toEpochMilli();
+
+        if (diff == 3600000) {
+            return StepEnum.Horaire;
+        } else if (diff == 1800000) {
+            return StepEnum.SemiHoraire;
+        } else if (diff == 600000) {
+            return StepEnum.DixMinutes;
+        } else if (diff == 900000) {
+            return StepEnum.QuinzeMinutes;
+        } else if (diff == 86400000) {
+            return StepEnum.Journalier;
+        } else {
+            throw new BusinessException("Invalid step");
+        }
+    }
+
+    public static void unifyStep(Cdc cdc1, Cdc cdc2){
+        // unify the step of the two cdc in order to have  the step with lowest duration
+        StepEnum step1 = cdc1.getCdcPas();
+        StepEnum step2 = cdc2.getCdcPas();
+        if(step1.getDurationInMinutes() < step2.getDurationInMinutes()){
+            changerPas(cdc2, step1);
+        } else {
+            changerPas(cdc1, step2);
+        }
+    }
+
+    public static Cdc changerPas(Cdc cdc, StepEnum stepEnum) {
+        StepEnum oldStep = cdc.getCdcPas();
+
+        if ((oldStep == StepEnum.QuinzeMinutes && stepEnum == StepEnum.DixMinutes) ||
+                (oldStep == StepEnum.DixMinutes && stepEnum == StepEnum.QuinzeMinutes)) {
+            cdc = changerPas(cdc, StepEnum.CinqMinutes);
+            oldStep = StepEnum.CinqMinutes;
+        }
+
+        if(oldStep == StepEnum.Journalier || stepEnum == StepEnum.Journalier) {
+            return changerPasJournalier(cdc, stepEnum);
+        }
+        int oldPNumber = Cdc.calculerNbPtsParHeure(oldStep);
+        int newPNumber = Cdc.calculerNbPtsParHeure(stepEnum);
+
+        if(cdc.getCurve()!= null) cdc.getCurve().setStep(stepEnum);
+        cdc.setCdcPas(stepEnum);
+
+        List<Double> puissances = cdc.getCdcPuissances();
+        List<Double> newPuissances = new ArrayList<>();
+
+        // Calculate total duration in minutes
+        long totalMinutes = ChronoUnit.MINUTES.between(cdc.getCdcDateDebut(), cdc.getCdcDateFin());
+
+        // Calculate the number of new points based on the new step size
+        int newPointCount = (int) (totalMinutes / stepEnum.getDurationInMinutes()) + 1;
+
+        if (newPNumber < oldPNumber) {
+            // Aggregating data (e.g., averaging values)
+            int conversionFactor = oldPNumber / newPNumber;
+            for (int i = 0; i < puissances.size(); i += conversionFactor) {
+                double sum = 0;
+                int count = 0;
+                for (int j = 0; j < conversionFactor && (i + j) < puissances.size(); j++) {
+                    if (puissances.get(i + j) != null) {
+                        sum += puissances.get(i + j);
+                        count++;
+                    }
+                }
+                if(count == 0) {
+                    newPuissances.add(null);
+                } else {
+                    newPuissances.add(sum / count);
+                }
+            }
+        } else if (newPNumber > oldPNumber) {
+            // Splitting data (e.g., repeating values)
+            int conversionFactor = newPNumber / oldPNumber;
+            for (Double value : puissances) {
+                for (int j = 0; j < conversionFactor; j++) {
+                    newPuissances.add(value);
+                }
+            }
+        } else {
+            // No change in the number of points per hour
+            newPuissances.addAll(puissances);
+        }
+
+        // Adjust newPuissances to match the new point count
+        if (newPuissances.size() > newPointCount) {
+            newPuissances = newPuissances.subList(0, newPointCount);
+        } else if (newPuissances.size() < newPointCount) {
+            while (newPuissances.size() < newPointCount) {
+                newPuissances.add(puissances.get(puissances.size() - 1));
+            }
+        }
+
+        cdc.setCdcPuissances(newPuissances);
+        cdc.reconstruireDates(newPuissances.size());
+
+        if(cdc.getCurve() != null && cdc.getCurve().getBinaryCurve() != null){
+            cdc.getCurve().getBinaryCurve().setData(convertDoublesToBytes(newPuissances));
+            cdc.getCurve().setStartDate(cdc.getCdcDateDebut());
+            cdc.getCurve().setEndDate(cdc.getCdcDateFin());
+        }
+
+        return cdc;
+    }
+
+    private static Cdc changerPasJournalier(Cdc cdc, StepEnum newStep) {
+        StepEnum oldStep = cdc.getCdcPas();
+        List<Double> puissances = cdc.getCdcPuissances();
+        List<Double> newPuissances = new ArrayList<>();
+
+        ZonedDateTime indexStartDate;
+        ZonedDateTime indexEndDate;
+
+        if(cdc.getCurve()!= null) cdc.getCurve().setStep(newStep);
+        cdc.setCdcPas(newStep);
+
+        if(newStep == StepEnum.Journalier && oldStep == StepEnum.Journalier) {
+            newPuissances.addAll(puissances);
+        } else if(newStep == StepEnum.Journalier) {
+            // aggregating data by day
+            for(int i = 0 ; i<puissances.size(); i++) {
+                indexStartDate = cdc.getCdcDates().get(i);
+                indexEndDate = cdc.getCdcDates().get(i).withHour(23).withMinute(59);
+                double sum = 0;
+                int count = 0;
+
+                while(i < puissances.size() && indexStartDate.isBefore(indexEndDate)) {
+                    if(puissances.get(i) != null){
+                        sum += puissances.get(i);
+                        count++;
+                    }
+
+                    if( (i+1) < puissances.size() && indexStartDate.plusMinutes(oldStep.getDurationInMinutes()).isBefore(indexEndDate)){
+                        indexStartDate = cdc.getCdcDates().get(i+1);
+                        i++;
+                    } else {
+                        indexStartDate = indexStartDate.plusMinutes(oldStep.getDurationInMinutes());
+                    }
+                }
+
+                if(count ==0) {
+                    newPuissances.add(null);
+                } else {
+                    newPuissances.add(sum/count);
+                }
+            }
+        } else if (oldStep == StepEnum.Journalier) {
+            // Duplicating value for each step of the day
+            for (int i = 0; i < puissances.size(); i++) {
+                indexStartDate = cdc.getCdcDates().get(i);
+                indexEndDate = cdc.getCdcDates().get(i).plusDays(1);
+
+                while (indexStartDate.isBefore(indexEndDate)) {
+                    newPuissances.add(puissances.get(i));
+                    indexStartDate = indexStartDate.plusMinutes(newStep.getDurationInMinutes());
+                }
+            }
+            cdc.setCdcDateFin(cdc.getCdcDateFin().plusDays(1).minusMinutes(newStep.getDurationInMinutes()));
+        }
+
+        cdc.setCdcPuissances(newPuissances);
+        cdc.reconstruireDates();
+
+        return cdc;
+    }
+
+    public boolean datesAreContinuous(Cdc cdc) {
+
+        if (cdcDates.isEmpty() || cdc.getCdcDates().isEmpty()) {
+            return true;
+        }
+
+        ZonedDateTime startDate1 = cdcDates.get(0);
+        ZonedDateTime endDate1 = cdcDates.get(cdcDates.size() - 1);
+        ZonedDateTime startDate2 = cdc.getCdcDates().get(0);
+        ZonedDateTime endDate2 = cdc.getCdcDates().get(cdc.getCdcDates().size() - 1);
+
+        int minimumDuration = Math.min(cdcPas.getDurationInMinutes(), cdc.getCdcPas().getDurationInMinutes());
+        Duration stepDuration = Duration.ofMinutes(minimumDuration);
+
+        // Check if periods overlap
+        boolean isOverlapping = endDate1.isAfter(startDate2) && startDate1.isBefore(endDate2);
+
+        // Check the gap between the end of one period and the start of the other
+        Duration gapAfter = Duration.between(endDate1, startDate2);
+        Duration gapBefore = Duration.between(endDate2, startDate1);
+
+        boolean isWithinStepAfter = !gapAfter.isNegative() && gapAfter.compareTo(stepDuration) <= 0;
+        boolean isWithinStepBefore = !gapBefore.isNegative() && gapBefore.compareTo(stepDuration) <= 0;
+
+        return isOverlapping || isWithinStepAfter || isWithinStepBefore;
+
+    }
+
+    public void mergeCdcAndIgnoreDiscontinuity(Cdc cdc, Double defaultValue){
+        extendCdc(cdc.getCdcDateDebut(), cdc.getCdcDateFin(), defaultValue);
+        int startIndex = getReducedStartDateIndex(cdc.getCdcDateDebut());
+        int lastIndex = getReducedEndDateIndex(cdc.getCdcDateFin());
+        IntStream.range(startIndex, lastIndex + 1).parallel().forEach(i -> {
+            if (cdc.getCdcPuissances().get(i - startIndex) != null) {
+                cdcPuissances.set(i, cdc.getCdcPuissances().get(i - startIndex));
+            }
+        });
+        curve.getBinaryCurve().setData(convertDoublesToBytes(cdcPuissances));
+    }
+
+    public void mergeCdcAndIgnoreDiscontinuity(Cdc cdc){
+        mergeCdcAndIgnoreDiscontinuity(cdc, null);
+    }
+
+    public void mergeCdc(Cdc cdc){
+        mergeCdc(cdc, true);
+    }
+
+    public void mergeCdc(Cdc cdc, boolean overwrite) {
+        List<Double> newCoeffs = cdc.getCdcPuissances();
+        List<Double> existingCoeffs = this.cdcPuissances;
+        List<ZonedDateTime> newDates = cdc.getCdcDates();
+        List<ZonedDateTime> existingDates = this.cdcDates;
+
+        if (!Objects.equals(cdcPas.getId(), cdc.getCdcPas().getId())) {
+            unifyStep(this, cdc);
+            // Refresh newCoeffs and existingCoeffs after unifying steps
+            newCoeffs = cdc.getCdcPuissances();
+            existingCoeffs = this.cdcPuissances;
+            newDates = cdc.getCdcDates();
+            existingDates = this.cdcDates;
+        }
+
+        if (!datesAreContinuous(cdc)) {
+            throw new BusinessException("Discontinuous dates detected.");
+        }
+
+        List<Double> mergedCoeffs = new ArrayList<>();
+        List<ZonedDateTime> mergedDates = new ArrayList<>();
+        int newIndex = 0;
+        int existingIndex = 0;
+
+        while (newIndex < newDates.size() && existingIndex < existingDates.size()) {
+            ZonedDateTime newDate = newDates.get(newIndex);
+            ZonedDateTime existingDate = existingDates.get(existingIndex);
+
+            if (newDate.isBefore(existingDate)) {
+                mergedDates.add(newDate);
+                mergedCoeffs.add(newCoeffs.get(newIndex));
+                newIndex++;
+            } else if (newDate.isAfter(existingDate)) {
+                mergedDates.add(existingDate);
+                mergedCoeffs.add(existingCoeffs.get(existingIndex));
+                existingIndex++;
+            } else {
+                mergedDates.add(newDate);
+                if((overwrite && newCoeffs.get(newIndex) != null) || existingCoeffs.get(existingIndex) == null) {
+                    mergedCoeffs.add(newCoeffs.get(newIndex));
+                } else {
+                    mergedCoeffs.add(existingCoeffs.get(existingIndex));
+                }
+                newIndex++;
+                existingIndex++;
+            }
+        }
+
+        // Add remaining elements from newDates
+        while (newIndex < newDates.size()) {
+            mergedDates.add(newDates.get(newIndex));
+            mergedCoeffs.add(newCoeffs.get(newIndex));
+            newIndex++;
+        }
+
+        // Add remaining elements from existingDates
+        while (existingIndex < existingDates.size()) {
+            mergedDates.add(existingDates.get(existingIndex));
+            mergedCoeffs.add(existingCoeffs.get(existingIndex));
+            existingIndex++;
+        }
+
+        this.cdcDates = mergedDates;
+        this.cdcPuissances = mergedCoeffs;
+        this.curve.getBinaryCurve().setData(convertDoublesToBytes(mergedCoeffs));
+        setStartEndDates();
+        reconstruireDates();
+        this.cdcPuissances = mergedCoeffs;
+        calculateCurveTotals();
+    }
+
+    public void setStartEndDates(){
+        setStartEndDates(cdcDates);
+    }
+
+    public static void calculateCurveTotals(Curve inpCurve){
+        if(inpCurve == null || inpCurve.getCurveType() != CurveTypeEnum.CDC) {
+            return;
+        }
+
+        Cdc cdc = new Cdc(inpCurve);
+
+        inpCurve.setTotalVolume(cdc.getSum()/calculerNbPtsParHeure(cdc.getCdcPas()));
+        inpCurve.setAnnualVolume(cdc.getSumLastYear()/calculerNbPtsParHeure(cdc.getCdcPas()));
+    }
+
+    public void calculateCurveTotals() {
+        if(curve != null && curve.getCurveType() == CurveTypeEnum.CDC) {
+            curve.setTotalVolume(getSum()/calculerNbPtsParHeure(cdcPas));
+            curve.setAnnualVolume(getSumLastYear()/calculerNbPtsParHeure(cdcPas));
+        }
+    }
+
+    public Double calculateHistoricalAnnualEnergyVolume(){
+        boolean hasEnoughHistory = cdcDateFin.isAfter(cdcDateDebut.plusDays(395));
+        if(hasEnoughHistory){
+            return getSum(cdcDateFin.minusDays(395).withHour(0).withMinute(0), cdcDateFin.minusDays(30)) / calculerNbPtsParHeure(cdcPas);
+        } else {
+            double ratio = (double) 365 / ChronoUnit.DAYS.between(cdcDateDebut, cdcDateFin);
+            return getSum() / calculerNbPtsParHeure(cdcPas) * ratio;
+        }
+    }
+
+    public void setStartEndDates(List<ZonedDateTime> dates) {
+        if(curve.getStartDate() != null) {
+            curve.setStartDate(dates.get(0).isBefore(curve.getStartDate()) ? dates.get(0) : curve.getStartDate());
+        } else {
+            curve.setStartDate(dates.get(0));
+        }
+
+        if(curve.getEndDate() != null) {
+            curve.setEndDate(dates.get(dates.size() - 1).isAfter(curve.getEndDate()) ? dates.get(dates.size() - 1) : curve.getEndDate());
+        } else {
+            curve.setEndDate(dates.get(dates.size() - 1));
+        }
+
+        cdcDateDebut = curve.getStartDate().withZoneSameInstant(currentZoneId);
+        cdcDateFin = curve.getEndDate().withZoneSameInstant(currentZoneId);
+    }
+
+    public Cdc recopier() {
+        Cdc cdc = new Cdc();
+        cdc.setCdcPas(this.cdcPas);
+        cdc.setCdcPuissances(new ArrayList<>(this.cdcPuissances));
+        cdc.setCdcDateDebut(this.cdcDateDebut);
+        cdc.setCdcDateFin(this.cdcDateFin);
+        cdc.setCdcDates(this.cdcDates);
+        Curve curve1 = duplicateCurve(this.curve);
+        cdc.setCurve(curve1);
+        cdc.setBinaryCurve(curve1.getBinaryCurve());
+        return cdc;
+    }
+
+    private Curve duplicateCurve(Curve curve) {
+        Curve newCurve = new Curve();
+        // todo : newCurve.setCurveType(curve.getCurveType());
+        newCurve.setStartDate(curve.getStartDate());
+        newCurve.setEndDate(curve.getEndDate());
+        newCurve.setBinaryCurve(new BinaryCurve());
+        newCurve.getBinaryCurve().setData(curve.getBinaryCurve().getData());
+        newCurve.getBinaryCurve().setCurve(newCurve);
+        newCurve.setStep(curve.getStep());
+        return newCurve;
+    }
+
+    public LocalDate paques(int annee) {
+        int a = annee % 19;
+        int b = annee / 100;
+        int c = annee % 100;
+        int d = b / 4;
+        int e = b % 4;
+        int f = (b + 8) / 25;
+        int g = (b - f + 1) / 3;
+        int h = (19 * a + b - d - g + 15) % 30;
+        int i = c / 4;
+        int k = c % 4;
+        int L = (32 + 2 * e + 2 * i - h - k) % 7;
+        int m = (a + 11 * h + 22 * L) / 451;
+        int mois = (h + L - 7 * m + 114) / 31;
+        int jour = ((h + L - 7 * m + 114) % 31) + 1;
+        return LocalDate.of(annee, mois, jour);
+    }
+
+    /** Retourne les 11 jours fériés français pour l'année donnée. */
+    public LocalDate[] joursFeries(int annee) {
+        LocalDate[] feries = new LocalDate[11];
+        feries[0]  = LocalDate.of(annee, 1, 1);
+        feries[1]  = LocalDate.of(annee, 5, 1);
+        feries[2]  = LocalDate.of(annee, 5, 8);
+        feries[3]  = LocalDate.of(annee, 7, 14);
+        feries[4]  = LocalDate.of(annee, 8, 15);
+        feries[5]  = LocalDate.of(annee, 11, 1);
+        feries[6]  = LocalDate.of(annee, 11, 11);
+        feries[7]  = LocalDate.of(annee, 12, 25);
+        feries[8]  = paques(annee).plusDays(1);    // Lundi de Pâques
+        feries[9]  = feries[8].plusDays(38);        // Ascension
+        feries[10] = feries[8].plusDays(49);        // Pentecôte
+        return feries;
+    }
+
+    public boolean isFerie(LocalDateTime dtDate) {
+        LocalDate date = dtDate.toLocalDate();
+        LocalDate[] feries = joursFeries(date.getYear());
+        for (LocalDate f : feries) {
+            if (date.equals(f)) return true;
+        }
+        return false;
+    }
+
+    public boolean isBissextile(int annee) {
+        return LocalDate.of(annee, 1, 1).isLeapYear();
+    }
+
+    public boolean isPaques(LocalDateTime dtDate) {
+        LocalDate[] feries = joursFeries(dtDate.getYear());
+        return dtDate.toLocalDate().equals(feries[8]);
+    }
+
+    public boolean isAscension(LocalDateTime dtDate) {
+        LocalDate[] feries = joursFeries(dtDate.getYear());
+        return dtDate.toLocalDate().equals(feries[9]);
+    }
+
+    public boolean isPentecote(LocalDateTime dtDate) {
+        LocalDate[] feries = joursFeries(dtDate.getYear());
+        return dtDate.toLocalDate().equals(feries[10]);
+    }
+
+    /**
+     * Retourne l'index de {@code date} dans dates, ou -1 si hors plage.
+     */
+    public int testIndex(ZonedDateTime date) {
+        List<ZonedDateTime> dates = this.getCdcDates();
+        if (dates == null || dates.isEmpty()) return -1;
+        if (date.isBefore(this.getCdcDateDebut()) || date.isAfter(this.getCdcDateFin())) return -1;
+        int i1 = 0, i2 = dates.size() - 1, i = 0;
+        while (i1 + 1 < i2) {
+            i = (i1 + i2) / 2;
+            if (dates.get(i).isAfter(date)) {
+                i2 = i;
+            } else {
+                i1 = i;
+            }
+        }
+        if (dates.get(i1).equals(date)) return i1;
+        return i2;
+    }
+
+    public int testIndexNew(LocalDateTime date) {
+        List<ZonedDateTime> dates = this.getCdcDates();
+        if (dates == null || dates.isEmpty()) return -1;
+        if (date.isBefore(this.getCdcDateDebut().toLocalDateTime()) || date.isAfter(this.getCdcDateFin().toLocalDateTime())) return -1;
+
+        int i1 = 0, i2 = dates.size() - 1, i = 0;
+        while (i1 + 1 < i2) {
+            i = (i1 + i2) / 2;
+            if (dates.get(i).toLocalDateTime().isAfter(date)) i2 = i;
+            else                        i1 = i;
+        }
+        if (dates.get(i1).toLocalDateTime().equals(date)) return i1;
+        return i2;
+    }
+
+    /** Vérifie si Noël est un pic dans la courbe source (comparaison max entre jours voisins). */
+    public static boolean isPicNoel(Cdc source) {
+        try {
+            int annee = source.getCdcDateDebut().getYear();
+            ZonedDateTime j1 = ZonedDateTime.of(LocalDate.of(annee, 12, 24).atStartOfDay(), source.getCdcDateDebut().getZone());
+            ZonedDateTime j2 = ZonedDateTime.of(LocalDate.of(annee, 12, 26).atStartOfDay(), source.getCdcDateDebut().getZone());
+            ZonedDateTime j3 = ZonedDateTime.of(LocalDate.of(annee, 12, 18).atStartOfDay(), source.getCdcDateDebut().getZone());
+            return isPic(source, j1, j2, j3);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private static boolean isPic(Cdc source, ZonedDateTime js1, ZonedDateTime js2, ZonedDateTime js3) {
+        try {
+            Duration interv = source.calculerIntervalle(source.getCdcPas());
+            double max1 = maxJour(source, js1);
+            double max2 = maxJour(source, js2);
+            double max3 = maxJour(source, js3);
+            if (source.testIndex(js1) < 0) max1 = max2;
+            if (source.testIndex(js2) < 0) max2 = max1;
+            double m = (max1 + max2) / 2.0;
+            return max3 > 1.5 * m;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Vérifie si le jour de remplacement est un "pic" pour le jour cible.
+     * Port de IsPic(Cdc, Cdc, DateTime, Dictionary, bool) C#.
+     */
+    public static boolean isPic(Cdc cible, Cdc source, LocalDate jourCible, Map<LocalDate, LocalDate> ciblesource, boolean jPlus7Avant) {
+        try {
+            LocalDate joursource = ciblesource.get(jourCible);
+            LocalDateTime js1 = joursource.minusDays(1).atStartOfDay();
+            LocalDateTime js2 = joursource.plusDays(1).atStartOfDay();
+            LocalDateTime js3 = source.trouverJourDeRemplacement(ZonedDateTime.of(joursource.atStartOfDay(), currentZoneId), jPlus7Avant).toLocalDateTime();
+            return isPic(source, ZonedDateTime.of(js1, currentZoneId), ZonedDateTime.of(js2, currentZoneId), ZonedDateTime.of(js3, currentZoneId));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // ── TrouverJourDeRemplacement ─────────────────────────────────────────────
+    /**
+     * Cherche le premier jour de remplacement valide (ni férié, ni manquant)
+     * en s'écartant progressivement de {@code jour} par semaines de 7 jours.
+     * Port de TrouverJourDeRemplacement() C#.
+     */
+    public ZonedDateTime trouverJourDeRemplacement(ZonedDateTime jour, boolean jPlus7Avant) {
+        ZonedDateTime retour = jour;
+        boolean ok = false, stop = false;
+        ZonedDateTime d1 = jour, d2 = jour;
+
+        while (!ok && !stop) {
+            d1 = d1.minusDays(7);
+            d2 = d2.plusDays(7);
+
+            int ind1 = testIndex(d1);
+            int ind2 = testIndex(d2);
+
+            if (jPlus7Avant) {
+                if (isValide(ind2) && !isMqt(ind2, false) && !isFerie(d2.toLocalDateTime().minus(this.calculerIntervalle(this.cdcPas)))) {
+                    retour = this.cdcDates.get(ind2); ok = true;
+                } else if (isValide(ind1) && !isMqt(ind1, false) && !isFerie(d1.toLocalDateTime().minus(this.calculerIntervalle(this.cdcPas)))) {
+                    retour = this.cdcDates.get(ind1); ok = true;
+                }
+            } else {
+                if (isValide(ind1) && !isMqt(ind1, false) && !isFerie(d1.toLocalDateTime().minus(this.calculerIntervalle(this.cdcPas)))) {
+                    retour = this.cdcDates.get(ind1); ok = true;
+                } else if (isValide(ind2) && !isMqt(ind2, false) && !isFerie(d2.toLocalDateTime().minus(this.calculerIntervalle(this.cdcPas)))) {
+                    retour = this.cdcDates.get(ind2); ok = true;
+                }
+            }
+            stop = !(isValide(ind1) || isValide(ind2));
+        }
+        return retour;
+    }
+
+    public boolean isValide(int idx) {
+        return idx >= 0 && idx < this.cdcPuissances.size();
+    }
+
+    public boolean isMqt(int idx, boolean inclureZero) {
+        if (!isValide(idx)) return true;
+        if (inclureZero) return isMissing(this.cdcPuissances.get(idx)) || this.cdcPuissances.get(idx) == 0.0;
+        return isMissing(this.cdcPuissances.get(idx));
+    }
+
+    private static double maxJour(Cdc source, ZonedDateTime jourDebut) {
+        Duration interv = source.calculerIntervalle(source.getCdcPas());
+        Cdc jour = source.recopier().projectCdc(
+                jourDebut.plus(interv),
+                jourDebut.plusDays(1),
+                source.getCdcPas());
+        if (jour == null) return Double.NEGATIVE_INFINITY;
+        double max = Double.NEGATIVE_INFINITY;
+        for (double v : jour.getCdcPuissances()) if (!Cdc.isMissing(v)) max = Math.max(max, v);
+        return max;
+    }
+
+    /** Vrai si {@code d} est le dernier dimanche de mars (jour de passage heure été). */
+    public static boolean isMarsDebutEte(ZonedDateTime d) {
+        return d.getMonthValue() == 3
+                && d.getDayOfWeek() == DayOfWeek.SUNDAY
+                && d.plusDays(7).getMonthValue() == 4;
+    }
+
+    /** Vrai si {@code d} est le dernier dimanche d'octobre (jour de passage heure hiver). */
+    public static boolean isOctobreFinEte(ZonedDateTime d) {
+        return d.getMonthValue() == 10
+                && d.getDayOfWeek() == DayOfWeek.SUNDAY
+                && d.plusDays(7).getMonthValue() == 11;
+    }
+
+
+    public static boolean isMissing(Double v) { return v == null || Double.isNaN(v); }
+
+    /** Compte le nombre de points appartenant au même jour que dates[startIdx]. */
+    public static int countPointsInDay(Cdc cdc, int startIdx) {
+        if (startIdx >= cdc.cdcDates.size()) return 0;
+        LocalDate jour = cdc.cdcDates.get(startIdx).minus(cdc.calculerIntervalle(cdc.cdcPas)).toLocalDate();
+        int count = 0;
+        for (int i = startIdx; i < cdc.cdcDates.size(); i++) {
+            if (cdc.cdcDates.get(i).minus(cdc.calculerIntervalle(cdc.cdcPas)).toLocalDate().equals(jour)) count++;
+            else break;
+        }
+        return count;
+    }
+
+    // ── Corriger les valeurs manquantes ──────────────────────────────────────
+
+    public void corrigerValeursNulles(boolean inclureValeurZero) {
+        Duration interv = this.calculerIntervalle(this.cdcPas);
+        for (int i = 0; i < this.cdcDates.size(); i++) {
+            if (isMqt(i, inclureValeurZero)) {
+                if (!isFerie(this.cdcDates.get(i).toLocalDateTime().minus(interv))) {
+                    this.cdcPuissances.set(i, corrigerValeurManquante(i, inclureValeurZero));
+                } else {
+                    this.cdcPuissances.set(i, corrigerValeurManquanteFerie(i, inclureValeurZero));
+                }
             }
         }
     }
 
-    private void forceGarbageCollection() {
-        System.gc();
-        System.runFinalization();
-        System.gc();
-    }
-
-    private void setJobReportData(Map<String, Object> methodContext) {
-        if (!notFoundPrms.isEmpty()) {
-            report.rep("PRM non trouvés et pour lesquels la reconstitution n'a pas été faite : \n" + String.join(", ", notFoundPrms));
-        }
-
-        if (!notFoundRfps.isEmpty()) {
-            report.rep("AO non trouvés et pour lesquels la reconstitution n'a pas été faite : \n" + notFoundRfps);
-        }
-
-        if (!noMeasuresFoundPrms.isEmpty()) {
-            report.rep("PRM pour lesquels aucune mesure n'a été trouvée : \n" + String.join(", ", noMeasuresFoundPrms));
-        }
-
-        if (!noProfileCoeffFoundPrms.isEmpty()) {
-            report.rep("PRM pour lesquels les coefficients de profile n'ont pas été trouvés : \n" + String.join(", ", noProfileCoeffFoundPrms));
-        }
-
-        methodContext.put(JOB_RESULT_NB_WARN, warnCounter.get());
-        methodContext.put(JOB_RESULT_REPORT, report.getReportBuilder().toString());
-        methodContext.put(JOB_RESULT_NB_OK, okCounter.get());
-        methodContext.put(JOB_RESULT_NB_KO, koCounter.get());
-    }
-
-    /*  Utility classes */
-    private enum ProfilingTypeEnum {
-        PRM,
-        RFP,
-        DEFAULT
-    }
-
-    private static class ObjectNotFoundException extends Exception {
-        public ObjectNotFoundException(String message) {
-            super(message);
+    public void corrigerJourFerieValeursNulles(boolean inclureValeurZero) {
+        Duration interv = this.calculerIntervalle(this.cdcPas);
+        for (int i = 0; i < this.cdcDates.size(); i++) {
+            if (isMqt(i, inclureValeurZero)) {
+                if (isFerie(this.cdcDates.get(i).toLocalDateTime().minus(interv))) {
+                    this.cdcPuissances.set(i,  corrigerValeurManquanteFerie(i, inclureValeurZero));
+                }
+            }
         }
     }
 
-    private static class NoMeasuresFoundException extends Exception {
-        public NoMeasuresFoundException(String message) {
-            super(message);
+    private double corrigerValeurManquante(int idx, boolean inclureZero) {
+        boolean ok = false, stop = false;
+        LocalDateTime d1 = this.cdcDates.get(idx).toLocalDateTime(), d2 = this.cdcDates.get(idx).toLocalDateTime();
+
+        while (!ok && !stop) {
+            d1 = d1.minusDays(7);
+            d2 = d2.plusDays(7);
+            int ind1 = testIndex(ZonedDateTime.of(d1, currentZoneId));
+            int ind2 = testIndex(ZonedDateTime.of(d2, currentZoneId));
+
+            if (isValide(ind1) && !isMqt(ind1, inclureZero) && !isFerie(d1.minus(this.calculerIntervalle(this.cdcPas)))) {
+                return this.cdcPuissances.get(ind1);
+            } else if (isValide(ind2) && !isMqt(ind2, inclureZero) && !isFerie(d2.minus(this.calculerIntervalle(this.cdcPas)))) {
+                return this.cdcPuissances.get(ind2);
+            }
+            stop = !(isValide(ind1) || isValide(ind2));
+        }
+        return 0.0;
+    }
+
+    private double corrigerValeurManquanteFerie(int idx, boolean inclureZero) {
+        LocalDate[] jf = joursFeries(this.getCdcDates().get(idx).getYear());
+        int cpt = 0;
+
+        // Convention fin-d'intervalle : on garde l'heure-du-jour de this.getCdcDates().get(idx)
+        // et on décale uniquement la date — équivalent C# CdcDates[i].AddDays(N).
+        long dayOfIdx = this.getCdcDates().get(idx).toLocalDate().toEpochDay();
+
+        // Compter les fériés avec valeur valide
+        for (LocalDate f : jf) {
+            ZonedDateTime target = this.getCdcDates().get(idx).plusDays(f.toEpochDay() - dayOfIdx);
+            int ind = testIndex(target);
+            if (!isMqt(ind, inclureZero)) cpt++;
+        }
+
+        double[] valeurs = new double[cpt];
+        LocalDate[] feriesOK = new LocalDate[cpt];
+        int k = 0;
+        for (LocalDate f : jf) {
+            ZonedDateTime target = this.getCdcDates().get(idx).plusDays(f.toEpochDay() - dayOfIdx);
+            int ind = testIndex(target);
+            if (!isMqt(ind, inclureZero)) {
+                valeurs[k] = this.getCdcPuissances().get(ind);
+                feriesOK[k] = f;
+                k++;
+            }
+        }
+
+        if (cpt == 0) return 0.0;
+        int best = cpt - 1;
+        LocalDate dateBest = feriesOK[cpt - 1];
+        for (int j = cpt - 1; j > 0; j--) {
+            if (Math.abs(this.getCdcDates().get(idx).toLocalDate().toEpochDay() - feriesOK[j].toEpochDay())
+                    < Math.abs(this.getCdcDates().get(idx).toLocalDate().toEpochDay() - dateBest.toEpochDay())) {
+                dateBest = feriesOK[j];
+                best = j;
+            }
+        }
+        return valeurs[best];
+    }
+
+    // Getters and Setters
+    public ZonedDateTime getCdcDateDebut() {
+        return cdcDateDebut;
+    }
+
+    public void setCdcDateDebut(ZonedDateTime cdcDateDebut) {
+        this.cdcDateDebut = cdcDateDebut;
+    }
+
+    public ZonedDateTime getCdcDateFin() {
+        return cdcDateFin;
+    }
+
+    public void setCdcDateFin(ZonedDateTime cdcDateFin) {
+        this.cdcDateFin = cdcDateFin;
+    }
+
+    public StepEnum getCdcPas() {
+        return cdcPas;
+    }
+
+    public void setCdcPas(StepEnum cdcPas) {
+        this.cdcPas = cdcPas;
+    }
+
+    public List<ZonedDateTime> getCdcDates() {
+        return cdcDates;
+    }
+
+    public void setCdcDates(List<ZonedDateTime> cdcDates) {
+        this.cdcDates = cdcDates;
+    }
+
+    public List<Double> getCdcPuissances() {
+        return cdcPuissances;
+    }
+
+    public void setCdcPuissances(List<Double> cdcPuissances) {
+        this.cdcPuissances = cdcPuissances;
+    }
+
+    public String getLibelle() {
+        return libelle;
+    }
+
+    public void setLibelle(String libelle) {
+        this.libelle = libelle;
+    }
+
+    public Boolean getErreurBin() {
+        return erreurBin;
+    }
+
+    public void setErreurBin(Boolean erreurBin) {
+        this.erreurBin = erreurBin;
+    }
+
+    public Long getCrbId() {
+        return crbId;
+    }
+
+    public void setCrbId(Long crbId) {
+        this.crbId = crbId;
+    }
+
+    public void initCurve() {
+        if(curve == null) {
+            curve = new Curve();
+            curve.setBinaryCurve(new BinaryCurve());
+            curve.getBinaryCurve().setCurve(curve);
+            curve.getBinaryCurve().setData(convertDoublesToBytes(cdcPuissances));
+            curve.setStep(cdcPas);
+            curve.setStartDate(cdcDateDebut);
+            curve.setEndDate(cdcDateFin);
         }
     }
 
-    private static class ProfileCoeffNotFound extends BusinessException {
-        public ProfileCoeffNotFound(String message) {
-            super(message);
-        }
+    public Curve getCurve() {
+        return curve;
     }
 
-    private static class UserDto extends MeveoUser {
-        public UserDto(MeveoUser meveoUser) {
-            super(meveoUser);
-        }
-        public boolean isForced() {
-            return this.forcedAuthentication;
-        }
+    public void setCurve(Curve curve) {
+        this.curve = curve;
+    }
+
+    public BinaryCurve getBinaryCurve() {
+        return binaryCurve;
+    }
+
+    public void setBinaryCurve(BinaryCurve binaryCurve) {
+        this.binaryCurve = binaryCurve;
     }
 }
-
