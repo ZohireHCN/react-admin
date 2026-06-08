@@ -25,6 +25,7 @@ public class BuildProdMojo extends AbstractMojo {
     private static final String RELEASE_FOLDER = "release";
     private static final String HOTFIX_FOLDER = "hotfix";
 
+    private static final String SQL_FOLDER = "sql";
     private static final String SQL_DATA_FOLDER = "sql-data";
     private static final String SQL_STRUCT_FOLDER = "sql-struct";
     private static final String POSTMAN_FOLDER = "postman";
@@ -33,6 +34,7 @@ public class BuildProdMojo extends AbstractMojo {
     private static final String JSON_EXTENSION = ".json";
 
     private static final String RELEASE_PREFIX = "release-";
+    private static final String SQL_SUFFIX = "-sql.sql";
     private static final String DATA_SUFFIX = "-data.sql";
     private static final String STRUCT_SUFFIX = "-struct.sql";
     private static final String POSTMAN_SUFFIX = "-postman.json";
@@ -60,7 +62,7 @@ public class BuildProdMojo extends AbstractMojo {
             Path targetRelease = base.resolve(TARGET_FOLDER).resolve(RELEASE_FOLDER);
 
             if (withGeneric) {
-                generateOneFolder(
+                generateGenericFolder(
                         src.resolve(GENERIC_FOLDER),
                         targetRelease.resolve(GENERIC_FOLDER),
                         GENERIC_FOLDER
@@ -87,7 +89,7 @@ public class BuildProdMojo extends AbstractMojo {
                             try {
                                 String folderName = folder.getFileName().toString();
 
-                                generateOneFolder(
+                                generateReleaseFolder(
                                         folder,
                                         targetRelease.resolve(prodVersion).resolve(folderName),
                                         prodVersion + "-" + folderName
@@ -118,7 +120,23 @@ public class BuildProdMojo extends AbstractMojo {
         }
     }
 
-    private void generateOneFolder(Path inputRoot, Path outputRoot, String releaseName)
+    private void generateGenericFolder(Path inputRoot, Path outputRoot, String releaseName)
+            throws IOException {
+
+        mergeTextFolder(
+                inputRoot.resolve(SQL_FOLDER),
+                outputRoot.resolve(RELEASE_PREFIX + releaseName + SQL_SUFFIX),
+                SQL_EXTENSION
+        );
+
+        mergePostmanCollections(
+                inputRoot.resolve(POSTMAN_FOLDER),
+                outputRoot.resolve(RELEASE_PREFIX + releaseName + POSTMAN_SUFFIX),
+                "Release " + releaseName
+        );
+    }
+
+    private void generateReleaseFolder(Path inputRoot, Path outputRoot, String releaseName)
             throws IOException {
 
         mergeTextFolder(
@@ -185,14 +203,11 @@ public class BuildProdMojo extends AbstractMojo {
                 return;
             }
 
-            String fileName = path.getFileName().toString();
-
             result.append(System.lineSeparator());
             result.append("-- =============================================").append(System.lineSeparator());
-            result.append("-- FILE : ").append(fileName).append(System.lineSeparator());
+            result.append("-- FILE : ").append(path.getFileName()).append(System.lineSeparator());
             result.append("-- =============================================").append(System.lineSeparator());
             result.append(System.lineSeparator());
-
             result.append(content);
             result.append(System.lineSeparator()).append(System.lineSeparator());
 
