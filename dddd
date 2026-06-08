@@ -1,1 +1,1002 @@
+public class CurveProfilingScript extends Script {
+    private static final String PRM_REFS_PARAM = "prmRefs";
+    private static final String RFP_IDS_PARAM = "rfpIds";
+    private static final String THREAD_COUNT_PARAM = "threadCount";
+    private static final String MEMORY_LIMIT_PARAM = "memoryLimit";
+    private static final String C5_LISSE = "calcC5Lissée";
+    private static final String C5_LISSE_DISABLED = "Désactivé";
+    private static final String SEMI_COLON = ";";
+    private static final String PARIS_TIME_ZONE = "Europe/Paris";
+    private static final Map<String, Double> THETA_VALUES = Map.of(
+            "PRO1_BASE", 0.08004,
+            "PRO2_HP", 0.0873,
+            "PRO2_HC", 0.04227,
+            "PRO5_BASE", 0.37297,
+            "PRO6_HPSH", 0.04522,
+            "PRO6_HCSH", 0.02202,
+            "PRO6_HPSB", 0.04208,
+            "PRO6_HCSB", 0.02025
+    );
+    // Reusable DTF for thread safety and performance
+    private static final DateTimeFormatter DATE_FORMATTER =
+            DateTimeFormatter.ofPattern("dd/MM/yyyy")
+                    .withZone(ZoneId.of(PARIS_TIME_ZONE));
+    private static final String DEFAULT_CALENDAR = "Distributeur";
+    private final transient ReportingDto report = new ReportingDto();
+    private final transient AtomicInteger okCounter = new AtomicInteger(0);
+    private final transient AtomicInteger koCounter = new AtomicInteger(0);
+    private final transient AtomicInteger warnCounter = new AtomicInteger(0);
+    private final transient CurveService curveService = (CurveService) getServiceInterface(CurveService.class.getSimpleName());
+    private final transient RfpService rfpService = (RfpService) getServiceInterface(RfpService.class.getSimpleName());
+    private final transient RfpDetailService rfpDetailService = (RfpDetailService) getServiceInterface(RfpDetailService.class.getSimpleName());
+    private final transient CorrelationTableService correlationTableService = (CorrelationTableService) getServiceInterface(CorrelationTableService.class.getSimpleName());
+    private final transient SubProfileCoefficientService subProfileCoefficientService = (SubProfileCoefficientService) getServiceInterface(SubProfileCoefficientService.class.getSimpleName());
+    private final transient BilledMeterReadingService bmrService = (BilledMeterReadingService) getServiceInterface(BilledMeterReadingService.class.getSimpleName());
+    private final transient PrmService prmService = (PrmService) getServiceInterface(PrmService.class.getSimpleName());
+    private final transient BilledCurveService billedCurveService = (BilledCurveService) getServiceInterface(BilledCurveService.class.getSimpleName());
+    private final transient EnedisContractualDataService enedisContractualDataService = (EnedisContractualDataService) getServiceInterface(EnedisContractualDataService.class.getSimpleName());
+    private final transient ContractualSituationService contractualSituationService = (ContractualSituationService) getServiceInterface(ContractualSituationService.class.getSimpleName());
+    private final transient List<String> notFoundPrms = Collections.synchronizedList(new ArrayList<>());
+    private final transient List<Long> notFoundRfps = Collections.synchronizedList(new ArrayList<>());
+    private final transient List<String> noMeasuresFoundPrms = Collections.synchronizedList(new ArrayList<>());
+    private final transient List<String> noProfileCoeffFoundPrms = Collections.synchronizedList(new ArrayList<>());
+    private transient ProfilingTypeEnum profilingType = ProfilingTypeEnum.DEFAULT;
+    private transient List<Long> rfpIds = new ArrayList<>();
+    private transient List<String> prmRefs = new ArrayList<>();
+    private transient String getC5Lisse;
+
+    /**
+     * Cache applicatif des templates de profil déjà convertis.
+     * Key   : identifiant de la courbe de référence récupérée en base.
+     * Value : données binaires converties une seule fois en double[].
+     *
+     * Important : on retourne toujours une copie du double[] avant traitement,
+     * car les méthodes CdcOpti modifient les tableaux en place.
+     */
+    private final transient ConcurrentHashMap<String, double[]> profileCurveValuesCache = new ConcurrentHashMap<>();
+
+    private transient List<CorrelationTable> correlationTable = null;
+    private transient List<SubProfileCoefficient> subProfileCoefficients = new ArrayList<>();
+    private transient String jobUser;
+    private transient ConcurrentHashMap<String, List<Long>> prmIdsByPoste = new ConcurrentHashMap<>();
+
+    private static final double MEMORY_MARGIN = 0.5;
+    private static final double MAX_MEMORY =  (Runtime.getRuntime().maxMemory() / 1000000000D) * MEMORY_MARGIN;
+    private static final double MAX_MEMORY_PERCENTAGE = 0.9;
+    private static final long GC_INTERVAL = 3;
+    private transient long gcLaunchTime = 0;
+    private final transient List<Long> prmIdsList = Collections.synchronizedList(new ArrayList<>());
+    private transient int threadCount = Runtime.getRuntime().availableProcessors();
+    private transient double memoryLimit = (MAX_MEMORY * MAX_MEMORY_PERCENTAGE);
+
+    private static final Map<String, String> TEMP_CLASS_CAT_MAPPING = Map.of(
+            "BASE", "BASE",
+            "HPHC", "HP",
+            "SAISON", "HPH"
+    );
+
+    private transient boolean automaticJobLaunch = false;
+
+    /**
+     * Entry point of the profiling script.
+     * <p>
+     * Recognized parameters in {@code context}:
+     * <ul>
+     *   <li>{@code prmRefs}: semicolon-separated PRM references list (PRM mode)</li>
+     *   <li>{@code rfpIds}: semicolon-separated RFP IDs list (RFP mode)</li>
+     *   <li>{@code threadCount}: optional custom parallelism level</li>
+     *   <li>{@code memoryLimit}: optional memory limit ratio</li>
+     * </ul>
+     * </p>
+     * @param context Job execution context and parameters.
+     * @throws BusinessException If configuration or processing fails.
+     */
+    @Override
+    public void execute(Map<String, Object> context) throws BusinessException {
+        log.info("Executing CurveProfilingScript with method {}", context);
+        jobUser = ((MeveoUser) context.getOrDefault(CONTEXT_CURRENT_USER, "")).getUserName();
+        automaticJobLaunch = isJobLaunchAutomatic(context);
+
+        try {
+            validateParams(context);
+            retrieveConfiguration();
+        } catch (BusinessException e) {
+            koCounter.incrementAndGet();
+            report.rep(e.getMessage());
+            setJobReportData(context);
+            return;
+        }
+
+        try {
+            switch (profilingType) {
+                case PRM:
+                    prmProfiling();
+                    break;
+                case RFP:
+                    rfpProfiling();
+                    break;
+                case DEFAULT:
+                    defaultProfiling();
+            }
+
+            if(!prmIdsList.isEmpty()){
+                prmService.selectPrmsAndupdateLoadCurveIntegration(prmIdsList, "rfd_reconstitution_status_id", RfpStatusEnum.TREATED.getId().intValue(), jobUser);
+                prmService.selectPrmsAndupdateLoadCurveIntegration(prmIdsList, "rfd_average_reconstitution_status_id", RfpStatusEnum.TO_TREAT.getId().intValue(), jobUser);
+            }
+
+            updatePrmPostes();
+        } catch (Exception e) {
+            log.info("Error while processing curves", e);
+            throw e;
+        }
+
+        setJobReportData(context);
+        curveService.getEntityManager().flush();
+    }
+
+    /**
+     * Persists computed PRM {@code poste} grouping in bulk for all processed PRMs.
+     * Uses a single update per poste value.
+     */
+    private void updatePrmPostes() {
+        for(Map.Entry<String, List<Long>> entry : prmIdsByPoste.entrySet()) {
+            try {
+                prmService.getEntityManager().createQuery("update Prm prm set prm.poste = :poste where prm.id in :prmIds")
+                        .setParameter("poste", entry.getKey())
+                        .setParameter("prmIds", entry.getValue())
+                        .executeUpdate();
+            } catch (Exception e) {
+                throw new BusinessException("Error while updating prm postes {}" + e.getMessage(), e);
+            }
+        }
+    }
+
+
+    /**
+     * Profiles the list of PRMs provided via the {@code prmRefs} parameter.
+     * Each PRM is processed independently; counters and reports are updated accordingly.
+     */
+    private void prmProfiling() {
+        for (String prmRef : prmRefs) {
+            try {
+                processPrm(prmRef);
+            } catch (NoMeasuresFoundException e) {
+                log.info(e.getMessage());
+                koCounter.incrementAndGet();
+                noMeasuresFoundPrms.add(prmRef);
+            } catch (ObjectNotFoundException e) {
+                log.info(e.getMessage());
+                notFoundPrms.add(prmRef);
+                koCounter.incrementAndGet();
+            } catch (ProfileCoeffNotFound e) {
+                log.info(e.getMessage());
+                koCounter.incrementAndGet();
+                noProfileCoeffFoundPrms.add(prmRef);
+            } catch (BusinessException e) {
+                log.info(e.getMessage());
+                koCounter.incrementAndGet();
+            } finally {
+                checkMemoryConsumption();
+            }
+        }
+    }
+
+    /**
+     * Profiles all PRMs attached to the provided RFP IDs.
+     * Errors for individual RFPs are collected without stopping the entire batch.
+     */
+    private void rfpProfiling() {
+        for (Long rfpId : rfpIds) {
+            try {
+                processRfp(rfpId);
+            } catch (ObjectNotFoundException e) {
+                log.info(e.getMessage());
+                notFoundRfps.add(rfpId);
+                koCounter.incrementAndGet();
+            } catch (BusinessException e) {
+                log.info(e.getMessage());
+                koCounter.incrementAndGet();
+            }
+        }
+    }
+
+    /**
+     * Performs profiling for a default selection of PRMs that are eligible based on
+     * contractual segment, statuses and measure properties.
+     * @throws BusinessException On query or processing failures.
+     */
+    private void defaultProfiling() throws BusinessException {
+        try {
+            List<Prm> prms = rfpDetailService.getEntityManager().createQuery("select distinct rfd.prm " +
+                                    "from RfpDetail rfd inner join EnedisContractualData ecd on ecd.prm.id = rfd.prm.id " +
+                                    "inner join ContractualSituation cos on cos.enedisContractualData.id = ecd.id " +
+                                    "inner join BilledMeterReading bmr on bmr.prm.id = rfd.prm.id " +
+                                    "where rfd.archived != true and rfd.prm.archived != true and cos.segment = :segment " +
+                                    "and rfd.reconstitutionStatusId = :status " +
+                                    "and bmr.calendar = :calendar and bmr.measureName != :estimated "
+                            , Prm.class)
+                    .setParameter("status", RfpStatusEnum.TO_TREAT.getId())
+                    .setParameter("segment", "C5")
+                    .setParameter("calendar", DEFAULT_CALENDAR)
+                    .setParameter("estimated", "Estimé")
+                    .getResultList();
+
+            processPrms(prms);
+        } catch (BusinessException e) {
+            report.rep(e.getMessage());
+        }
+    }
+
+    /**
+     * Processes a list of PRMs in parallel using a ForkJoinPool.
+     * Manages lifecycle of the thread pool and aggregates results and errors.
+     *
+     * @param prms PRMs to process.
+     * @throws BusinessException If execution of parallel tasks fails.
+     */
+    private void processPrms(List<Prm> prms) throws BusinessException {
+        AtomicInteger counter = new AtomicInteger(0);
+
+        ForkJoinPool customThreadPool = new ForkJoinPool(threadCount);
+        try {
+            customThreadPool.submit(() ->
+                    prms.parallelStream().forEach(prm -> {
+                        try {
+                            log.info("Processing PRM {}/{} with ref : {}",
+                                    counter.incrementAndGet(), prms.size(), prm.getReference());
+                            processPrm(prm);
+                        } catch (NoMeasuresFoundException e) {
+                            koCounter.incrementAndGet();
+                            noMeasuresFoundPrms.add(prm.getReference());
+                        } catch (ProfileCoeffNotFound e) {
+                            koCounter.incrementAndGet();
+                            noProfileCoeffFoundPrms.add(prm.getReference());
+                        } catch (BusinessException e) {
+                            koCounter.incrementAndGet();
+                            report.rep(e.getMessage());
+                        } finally {
+                            checkMemoryConsumption();
+                        }
+                    })
+            ).get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BusinessException("Processing was interrupted", e);
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            if (cause instanceof BusinessException) {
+                throw (BusinessException) cause;
+            }
+            throw new BusinessException("Processing failed", cause);
+        } finally {
+            customThreadPool.shutdown();
+            try {
+                // Wait for existing tasks to terminate
+                if (!customThreadPool.awaitTermination(6, TimeUnit.HOURS)) {
+                    log.warn("Thread pool didn't terminate gracefully, forcing shutdown");
+                    customThreadPool.shutdownNow();
+                    // Wait a bit more for tasks to respond to being cancelled
+                    if (!customThreadPool.awaitTermination(10, TimeUnit.SECONDS)) {
+                        log.error("Thread pool didn't terminate after forced shutdown");
+                    }
+                }
+            } catch (InterruptedException e) {
+                log.warn("Interrupted while waiting for thread pool shutdown");
+                customThreadPool.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    /**
+     * Loads a PRM by reference and processes it.
+     *
+     * @param prmRef PRM reference.
+     * @throws BusinessException On processing errors.
+     * @throws ObjectNotFoundException If the PRM cannot be found.
+     * @throws NoMeasuresFoundException If no eligible measures are found for the PRM.
+     */
+    private void processPrm(String prmRef) throws BusinessException, ObjectNotFoundException, NoMeasuresFoundException {
+        Prm prm;
+
+        try {
+            prm = prmService.getEntityManager().createQuery("select prm from Prm prm where reference = :reference", Prm.class)
+                    .setParameter("reference", prmRef)
+                    .getSingleResult();
+        } catch (Exception e) {
+            throw new ObjectNotFoundException("PRM non trouvé : " + prmRef);
+        }
+
+        processPrm(prm);
+    }
+
+
+    /**
+     * Processes a single PRM: reads measures, determines temporal class target,
+     * builds curves and persists results.
+     *
+     * @param prm PRM entity.
+     * @throws BusinessException On processing errors or data inconsistencies.
+     * @throws NoMeasuresFoundException If the PRM has no eligible billed measures.
+     */
+    private void processPrm(Prm prm) throws BusinessException, NoMeasuresFoundException {
+        Map<String, CdcOpti> profileMap = new HashMap<>();
+        List<BilledMeterReading> bmrList = getBilledMeterReadings(prm);
+        //        report.rep("[1] début traitement de " + bmrList.size() + " relèves distributeur non estimé pour PRM " + prm.getReference());
+
+        if (bmrList.isEmpty()) {
+            throw new NoMeasuresFoundException("Aucune relève trouvée pour le PRM " + prm.getReference());
+        }
+
+        bmrList.forEach(bmr -> {
+            String tClass = bmr.getTemporalClass();
+            if (tClass.equals("HCB")) {
+                bmr.setTemporalClass("HCE");
+            } else if (tClass.equals("HPB")) {
+                bmr.setTemporalClass("HPE");
+            }
+        });
+
+        getFuds(prm, bmrList);
+
+        MeterReadingList meterReadingList = new MeterReadingList();
+        if(C5_LISSE_DISABLED.equals(getC5Lisse)){
+            bmrList.forEach(meterReadingList::add);
+        } else {
+            bmrList.forEach(meterReadingList::addDailySplit);
+        }
+
+   /*     report.rep("[2] équivalent de " + meterReadingList.getList().size() + " meterReading pour PRM " + prm.getReference());
+        meterReadingList.getList().forEach(mr -> {
+            report.rep("MeterReading [" + mr.getStartDate().toLocalDate() + " -> " + mr.getEndDate().toLocalDate() + "]");
+            for (Map.Entry<String, BilledMeterReading> e : mr.getBmrList().entrySet()) {
+                if(!"BASE".equals(e.getKey()) && e.getValue().getMeasure() > 0D){
+                    report.rep("   " + e.getKey() + " => " + e.getValue());
+                }
+            }
+        }); */
+
+        String fournisseurTemporalCat = getLastFournisseurMeasureTemporalClass(prm);
+        addPrmToPosteMap(prm.getId(), getPrmPoste(prm));
+
+        Map<String, CdcOpti> cdcMap = new HashMap<>();
+        String targetClassCat = getPrmTargetClass(prm, fournisseurTemporalCat);
+        // report.rep("[3] la classe temp de la dernière relève est : " + targetClassCat + " pour prm " + prm.getReference() + " contenant " + bmrList.size() + " relèves.");
+        handleMeterReadingList(prm, targetClassCat, cdcMap, profileMap, meterReadingList);
+        // Save curves
+        saveCurves(prm, cdcMap, targetClassCat);
+        prmIdsList.add(prm.getId());
+        okCounter.incrementAndGet();
+        profileMap.clear();
+    }
+
+    /**
+     * Adds a PRM ID to the internal map keyed by poste in a thread-safe manner.
+     * @param prmId PRM identifier.
+     * @param poste Poste value resolved for the PRM.
+     */
+    private synchronized void addPrmToPosteMap(Long prmId, String poste){
+        prmIdsByPoste.computeIfAbsent(poste, k -> new ArrayList<>()).add(prmId);
+    }
+
+    /**
+     * Resolves the poste for a PRM, using its sub-profile or deducing it from the latest
+     * temporal class and the mapping rules.
+     * @param prm PRM entity.
+     * @return Poste value.
+     * @throws BusinessException If poste cannot be determined.
+     */
+    private String getPrmPoste(Prm prm) {
+        String subProfile;
+
+        if(prm.getSubProfile() == null || prm.getSubProfile().isBlank()) {
+            String tempClass = getPosteTemporalClass(prm);
+            if("PRO5_BASE_TEMPORAL_CLASS".equals(tempClass)) {
+                subProfile = "PRO5_BASE";
+            }else {
+                subProfile = getSubProfileMapping(tempClass);
+            }
+        } else {
+            subProfile = prm.getSubProfile();
+        }
+
+        int underscoreIndex = subProfile.indexOf('_');
+        if(underscoreIndex == -1) {
+            throw new BusinessException("Unable to identify poste for prm "+ prm.getReference());
+        }
+        return subProfile.substring(0, underscoreIndex);
+    }
+
+    /**
+     * Retrieves the most recent temporal class observed for a PRM, across calendars,
+     * with precedence rules :
+     * 1) (Fournisseur && temporalClass = BASE && usageContext in ('UPIN', 'ECPU')
+     * 2) (Fournisseur over Distributeur, Réel over Estimé).
+     * @param prm PRM entity.
+     * @return Temporal class string or empty when unavailable.
+     */
+    private String getPosteTemporalClass(Prm prm) {
+        try {
+            String temporalClass = bmrService.getEntityManager().createQuery("select temporalClass from BilledMeterReading " +
+                            "where calendar = 'Fournisseur' and prm.id = :prmId order by endDate desc", String.class)
+                    .setParameter("prmId", prm.getId())
+                    .setMaxResults(1)
+                    .getSingleResult();
+
+            if("BASE".equals(temporalClass)){
+                ContractualSituation contractualSituation = contractualSituationService.getEntityManager()
+                        .createQuery("select cs from ContractualSituation cs " +
+                                "where cs.enedisContractualData.prm.id = :prmId " +
+                                "and cs.usageContext in ('UPIN', 'ECPU')", ContractualSituation.class)
+                        .setParameter("prmId", prm.getId())
+                        .setMaxResults(1)
+                        .getSingleResult();
+
+                if(contractualSituation != null){
+                    return "PRO5_BASE_TEMPORAL_CLASS";
+                }
+                return getTemporalClassOfLastBilledMeterReading(prm);
+            }
+            return getTemporalClassOfLastBilledMeterReading(prm);
+
+        } catch (Exception e) {
+            return getTemporalClassOfLastBilledMeterReading(prm);
+        }
+    }
+
+
+    private String getTemporalClassOfLastBilledMeterReading(Prm prm) {
+        try {
+            return bmrService.getEntityManager().createQuery("select temporalClass from BilledMeterReading " +
+                            "where prm.id = :prmId order by endDate desc, case when calendar = 'Fournisseur' then 1 " +
+                            "when calendar = 'Distributeur' then 2 else 3 end, " +
+                            "case when measureName = 'Réel' then 1 when measureName = 'Estimé' then 2 else 3 end", String.class)
+                    .setParameter("prmId", prm.getId())
+                    .setMaxResults(1)
+                    .getSingleResult();
+        } catch (Exception e) {
+            log.info("Unable to find temporal class for PRM {} : {}", prm.getReference(), e.getMessage(), e);
+            return EMPTY_STRING;
+        }
+    }
+
+    /**
+     * Retrieves the temporal class of the latest Fournisseur measure for a PRM.
+     * @param prm PRM entity.
+     * @return Temporal class string.
+     * @throws BusinessException If no Fournisseur measure is available.
+     */
+    private String getLastFournisseurMeasureTemporalClass(Prm prm) {
+        String result = bmrService.getEntityManager().createQuery("select bmr.temporalClass from BilledMeterReading bmr " +
+                        "where bmr.prm.id = :prmId and bmr.calendar = :calendar and bmr.measureName != :estimated " +
+                        "order by bmr.endDate desc", String.class)
+                .setParameter("prmId", prm.getId())
+                .setParameter("calendar", "Fournisseur")
+                .setParameter("estimated", "Estimé")
+                .getResultStream().findFirst().orElse(null);
+
+        if(result == null) {
+            throw new BusinessException("Unable to find last measure for prm "+ prm.getReference());
+        }
+
+        if(result.equals("HCB") || result.equals("HCE") || result.equals("HPB") || result.equals("HPE")) {
+            result = result.replace("B", "E");
+        }
+
+        return result;
+    }
+
+    private String getPrmTargetClass(Prm prm, String defaultTemporalClass) {
+        if(prm.getSubProfile() == null || prm.getSubProfile().isBlank()) {
+            return MeterReading.getTemporalCat(defaultTemporalClass);
+        } else if(prm.getSubProfile().endsWith("BASE")){
+            return "BASE";
+        } else if (prm.getSubProfile().endsWith("HP") || prm.getSubProfile().endsWith("HC")) {
+            return "HPHC";
+        } else if (prm.getSubProfile().contains("HP") || prm.getSubProfile().contains("HC")) {
+            return "SAISON";
+        } else {
+            throw new BusinessException("Not-supported sub-profile "+prm.getSubProfile()+" for "+prm.getReference());
+        }
+    }
+
+    private Double getPrmPS(Prm prm) {
+        try {
+            EnedisContractualData enedisContractualData = enedisContractualDataService.getEntityManager()
+                    .createQuery(
+                            "select ecd from EnedisContractualData ecd " +
+                                    "left join fetch ecd.contractualSituations " +
+                                    "where ecd.prm.id = :prmId",
+                            EnedisContractualData.class)
+                    .setParameter("prmId", prm.getId())
+                    .setMaxResults(1)
+                    .getSingleResult();
+
+            List<ContractualSituation> situations = enedisContractualData.getContractualSituations();
+            if (!situations.isEmpty()) {
+                double ps = situations.get(0).getSubscribedPowerValue();
+                if (situations.get(0).getSubscribedPowerUnit().equalsIgnoreCase("kVA")) {
+                    return ps / 1000;
+                }
+            }
+
+            return null;
+        } catch (NoResultException e) {
+            log.info("No contractual data found for PRM with ID: {}", prm.getId());
+            return null;
+        } catch (Exception e) {
+            log.info("No subscribed power found for PRM with ID: {} ({})", prm.getId(), e.getMessage());
+            return null;
+        }
+    }
+
+    private void getFuds(Prm prm, List<BilledMeterReading> bmrList) {
+        List<BilledMeterReading> filteredBmrList = bmrList.stream()
+                .filter(bmr -> bmr != null && Boolean.TRUE.equals(bmr.getOverwriteMeasure()))
+                .collect(Collectors.toList());
+
+        if(filteredBmrList.isEmpty()) {
+            return;
+        }
+
+        Double ps = getPrmPS(prm);
+
+        if (ps == null) {
+            return;
+        }
+
+        filteredBmrList.forEach(bmr -> {
+            String subProfile = getSubProfile(prm, bmr.getTemporalClass());
+            Double theta = THETA_VALUES.get(subProfile);
+            if (theta == null) {
+                log.info("Theta value not found for sub-profile {}, prm {}", subProfile, prm.getReference());
+                warnCounter.incrementAndGet();
+                report.rep(String.format("Valeur de theta non trouvée pour le sous-profil %s, prm %s", subProfile, prm.getReference()));
+                return;
+            }
+            bmr.setFudMeasure(BigDecimal.valueOf(ps).multiply(BigDecimal.valueOf(theta)).doubleValue());
+            bmrService.update(bmr, jobUser);
+        });
+
+        filteredBmrList.clear();
+    }
+
+    // Filtrer sur les PRMs C5
+    private void processRfp(Long rfpId) throws BusinessException, ObjectNotFoundException {
+        Rfp rfp = rfpService.findById(rfpId);
+
+        if (rfp == null) {
+            throw new ObjectNotFoundException("RFP non trouvé : " + rfpId);
+        }
+
+        List<Prm> prmsToProcess = rfpDetailService.getPrmsByRfpAndSegment(rfp.getId(), "C5");
+        processPrms(prmsToProcess);
+    }
+
+
+    private void handleMeterReadingList(Prm prm, String targetClassCat, Map<String, CdcOpti> cdcMap, Map<String, CdcOpti> profileMap, MeterReadingList meterReadingList) {
+        List<String> targetClasses = getTargetClasses(targetClassCat);
+
+        // report.rep("[4] PRM Reference | Sub-profile | EP | Coeff sum | FU (Ep/coeffSum) | start | end");
+
+        log.debug("PRM Reference | Sub-profile | FU (Ep/coeffSum) | Coeff sum | start | end");
+        meterReadingList.getList()//.stream().parallel()
+                .forEach(m -> handleUnitMR(prm, cdcMap, m, targetClasses, profileMap));
+    }
+
+    private void handleUnitMR(Prm prm, Map<String, CdcOpti> cdcMap, MeterReading mr, List<String> targetClasses, Map<String, CdcOpti> profileMap) {
+        if (!validateMeterReading(mr)) {
+            warnCounter.incrementAndGet();
+            report.rep(String.format("Classes temporelles manquantes pour le prm %s sur la période %s - %s : %s",
+                    prm.getReference(),
+                    mr.getStartDate().format(DATE_FORMATTER),
+                    mr.getEndDate().format(DATE_FORMATTER),
+                    getMissingTempClasses(mr, targetClasses)));
+            return;
+        }
+        targetClasses.stream().parallel().forEach(tempClassTarget -> {
+            try {
+                handleMeterReading(prm, mr, cdcMap, tempClassTarget, profileMap);
+            } catch (ProfileCoeffNotFound e) {
+                log.info("Profile not found for PRM {}, temporal class {} and period {} to {}",
+                        prm.getReference(), tempClassTarget,
+                        mr.getStartDate().format(DATE_FORMATTER), mr.getEndDate().format(DATE_FORMATTER));
+            } catch (Exception e) {
+                throw e;
+            }
+        });
+    }
+
+    private String getMissingTempClasses(MeterReading mr, List<String> targetClasses) {
+        List<String> missingClasses = new ArrayList<>();
+        for (String targetClass : targetClasses) {
+            if (!mr.getBmrList().containsKey(targetClass)) {
+                missingClasses.add(targetClass);
+            }
+        }
+        return String.join(", ", missingClasses);
+
+    }
+
+    private boolean validateMeterReading(MeterReading mr) {
+        String classCat = mr.getTemporalCat();
+
+        switch (classCat) {
+            case "HPHC":
+                return mr.getBmrList().size() == 2;
+            case "SAISON":
+                return mr.getBmrList().size() == 4;
+            default:
+                return true;
+        }
+    }
+
+    private void saveCurves(Prm prm, Map<String, CdcOpti> cdcMap, String targetClassCat) {
+        Map<String, BilledCurve> bcMap = billedCurveService.getEntityManager().createQuery("select bc from BilledCurve bc " +
+                        "where bc.prm = :prm and bc.curve.curveTypeId = :getC5lisse", BilledCurve.class)
+                .setParameter("prm", prm)
+                .setParameter("getC5lisse", getCurveTypeEnum().getId())
+                .getResultList().stream()
+                .collect(Collectors.toMap(BilledCurve::getTemporalClass, bc -> bc));
+        for (Map.Entry<String, CdcOpti> entryCdc : cdcMap.entrySet()) {
+            if (bcMap.get(entryCdc.getKey()) != null && getTemporalCat(entryCdc.getKey()).equals(targetClassCat)) {
+                CdcOpti bcCdc = new CdcOpti(bcMap.get(entryCdc.getKey()).getCurve());
+                bcCdc.mergeCdcAndIgnoreDiscontinuity(entryCdc.getValue());
+                bcCdc.getCurve().getBinaryCurve().setData(CdcOpti.convertDoublesToBytes(bcCdc.getCdcPuissances()));
+                bcMap.get(entryCdc.getKey()).setHistoricalAnnualEnergyVolume(bcCdc.calculateHistoricalAnnualEnergyVolume());
+
+                curveService.update(bcCdc.getCurve(), jobUser);
+                billedCurveService.update(bcMap.get(entryCdc.getKey()), jobUser);
+            } else {
+                if (bcMap.get(entryCdc.getKey()) != null) {
+                    billedCurveService.deletePrmCurveByTC(prm, entryCdc.getKey());
+                }
+                BilledCurve bc = new BilledCurve();
+                bc.setPrm(prm);
+                bc.setTemporalClass(entryCdc.getKey());
+                entryCdc.getValue().getCurve().getBinaryCurve().setData(CdcOpti.convertDoublesToBytes(entryCdc.getValue().getCdcPuissances()));
+                bc.setHistoricalAnnualEnergyVolume(entryCdc.getValue().calculateHistoricalAnnualEnergyVolume());
+                // Grouper les 2 opérations de création dans une seule transaction
+                curveService.create(entryCdc.getValue().getCurve(), jobUser);
+                bc.setCurve(entryCdc.getValue().getCurve());
+                billedCurveService.create(bc, jobUser);
+            }
+        }
+        bcMap.forEach((k, v) -> {
+            if (!cdcMap.containsKey(k)) {
+                billedCurveService.deletePrmCurveByTC(prm, k);
+            }
+        });
+        bcMap.clear();
+    }
+
+    private void handleMeterReading(Prm prm, MeterReading mr, Map<String, CdcOpti> cdcMap, String tempClassTarget, Map<String, CdcOpti> profileMap) throws ProfileCoeffNotFound {
+        String subProfile = getSubProfile(prm, tempClassTarget);
+        CdcOpti cdc = cdcMap.getOrDefault(tempClassTarget, null);
+
+        CdcOpti profileCdc = loadProfileData(subProfile, profileMap);
+        CdcOpti profileData;
+        try {
+            ZonedDateTime startDate = mr.getStartDate();
+            ZonedDateTime endDate = mr.getStartDate().isEqual(mr.getEndDate()) ?
+                    mr.getEndDate().plusDays(1).minusMinutes(StepEnum.Horaire.getDurationInMinutes()) :
+                    mr.getEndDate().minusMinutes(StepEnum.Horaire.getDurationInMinutes());
+            if (startDate.isBefore(profileCdc.getCdcDateDebut()) || endDate.isAfter(profileCdc.getCdcDateFin())) {
+                throw new ProfileCoeffNotFound("Date de début ou de fin non trouvée dans le profil");
+            }
+
+            profileData = profileCdc.getReducedCdc(startDate, endDate);
+
+            if(hasMissingValues(profileData.getCdcPuissances())) {
+                throw new ProfileCoeffNotFound("Le sous-profil contient des valeurs nulles");
+            }
+        } catch (Exception e) {
+            log.error("Profile coeff not found for sub-profile {}", subProfile, e);
+            throw new ProfileCoeffNotFound(e.getMessage());
+        }
+
+        CurveTypeEnum curveTypeEnum = getCurveTypeEnum();
+        profileData.getCurve().setCurveType(curveTypeEnum);
+        profileData.getCurve().setDescription(curveTypeEnum.name());
+
+        Double eP = mr.getEp(tempClassTarget, subProfileCoefficients);
+        Double coeffSum = profileData.getSum();
+        Double fu = coeffSum == 0 ? 0D : eP / coeffSum;
+        //       if(mr.getStartDate().toLocalDateTime().isAfter(LocalDateTime.of(2024, 7,30, 0, 0, 0))){
+        //      report.rep(prm.getReference() + " | " + subProfile + " | " + eP + " | " + coeffSum + " | " + fu + " | " + mr.getStartDate().toLocalDate() + " | " + mr.getEndDate().toLocalDate());
+        //      }
+        log.debug("{} | {} | {} | {} | {} | {}", prm.getReference(), subProfile, fu, coeffSum, mr.getStartDate(), mr.getEndDate());
+        // report.rep("valeur de la courbe AVANT multiplication, de l'heure : " + profileData.getCdcDates().get(3).toLocalDateTime() + " est " + profileData.getCdcPuissances()[3]);
+        profileData.multiplyBy(fu);
+        // report.rep("valeur de la courbe APRES multiplication, de l'heure : " + profileData.getCdcDates().get(3).toLocalDateTime() + " est " + profileData.getCdcPuissances()[3]);
+        if (cdc == null) {
+            cdcMap.put(tempClassTarget, profileData);
+        } else {
+            cdcMap.get(tempClassTarget).mergeCdcAndIgnoreDiscontinuity(profileData);
+            cdcMap.get(tempClassTarget).getCurve().getBinaryCurve().setData(
+                    CdcOpti.convertDoublesToBytes(cdcMap.get(tempClassTarget).getCdcPuissances()));
+        }
+    }
+
+    @NotNull
+    private CurveTypeEnum getCurveTypeEnum() {
+        return C5_LISSE_DISABLED.equals(getC5Lisse) ? CurveTypeEnum.CDC_PROFILE : CurveTypeEnum.CDC_PROFILE_LISSE;
+    }
+
+    private CdcOpti loadProfileData(String subProfile, Map<String, CdcOpti> profileMap) {
+        CdcOpti localProfile = profileMap.get(subProfile);
+        if (localProfile != null) {
+            return localProfile.recopier();
+        }
+
+        try {
+            List<Curve> curves = curveService.getEntityManager().createQuery("select c from Curve c " +
+                            "where c.description = :descriptionAjuste or c.description = :descriptionDynamique", Curve.class)
+                    .setParameter("descriptionAjuste", subProfile.toUpperCase() + "_COEFF_AJUSTE")
+                    .setParameter("descriptionDynamique", subProfile.toUpperCase() + "_COEFF_DYNAMIQUE")
+                    .setMaxResults(2)
+                    .getResultList();
+
+            CdcOpti adjustedCdc = null;
+            CdcOpti dynamicCdc = null;
+
+            for (Curve curve : curves) {
+                curveService.getEntityManager().detach(curve);
+
+                CdcOpti cdc = new CdcOpti(curve.getStep(), curve.getStartDate(), curve.getEndDate(), null);
+
+                // Cache uniquement le contenu binaire converti en double[].
+                // La copie protège le cache, car changerPas/merge/multiply modifient les tableaux en place.
+                cdc.setCdcPuissances(getCachedProfileCurveValues(curve));
+                cdc = CdcOpti.changerPas(cdc, StepEnum.Horaire);
+
+                if (curve.getDescription().endsWith("_AJUSTE")) {
+                    adjustedCdc = cdc;
+                } else if (curve.getDescription().endsWith("_DYNAMIQUE")) {
+                    dynamicCdc = cdc;
+                }
+            }
+
+            if (adjustedCdc == null || dynamicCdc == null) {
+                throw new ProfileCoeffNotFound("Profile coeff not found for sub-profile " + subProfile);
+            }
+
+            adjustedCdc.mergeCdcAndIgnoreDiscontinuity(dynamicCdc);
+
+            profileMap.put(subProfile, adjustedCdc.recopier());
+            return adjustedCdc;
+        } catch (Exception e) {
+            log.error("Profile coeff not found for sub-profile {}", subProfile, e);
+            throw new ProfileCoeffNotFound("Profile coeff not found for sub-profile " + subProfile);
+        }
+    }
+
+    private double[] getCachedProfileCurveValues(Curve curve) {
+        String cacheKey = buildProfileCurveCacheKey(curve);
+
+        double[] cachedValues = profileCurveValuesCache.computeIfAbsent(
+                cacheKey,
+                key -> CdcOpti.convertBytesToDoubles(curve.getBinaryCurve().getData())
+        );
+
+        return Arrays.copyOf(cachedValues, cachedValues.length);
+    }
+
+    private String buildProfileCurveCacheKey(Curve curve) {
+        if (curve.getId() != null) {
+            return "curve:" + curve.getId();
+        }
+
+        return "curve:" + curve.getDescription()
+                + ":" + curve.getStep()
+                + ":" + curve.getStartDate()
+                + ":" + curve.getEndDate();
+    }
+
+    private static boolean hasMissingValues(double[] values) {
+        for (double value : values) {
+            if (Double.isNaN(value)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<BilledMeterReading> getBilledMeterReadings(Prm prm) {
+        return bmrService.getEntityManager().createQuery("select bmr from BilledMeterReading bmr " +
+                        "where bmr.prm.id = :prmId and bmr.calendar = :calendar and bmr.measureName != :estimated " +
+                        " and bmr is not null " +
+                        "order by bmr.startDate asc", BilledMeterReading.class)
+                .setParameter("prmId", prm.getId())
+                .setParameter("calendar", DEFAULT_CALENDAR)
+                .setParameter("estimated", "Estimé")
+                .getResultList();
+    }
+
+    private void retrieveConfiguration() {
+        correlationTable = correlationTableService.list();
+        subProfileCoefficients = subProfileCoefficientService.list();
+    }
+
+    /*  Utility methods */
+    private List<String> getTargetClasses(String targetClassCat) {
+        switch (targetClassCat) {
+            case "HPHC":
+                return MeterReading.HPHC_CLASSES;
+            case "SAISON":
+                return MeterReading.SAISON_CLASSES;
+            default:
+                return List.of("BASE");
+        }
+    }
+
+    private String getSubProfile(Prm prm, String temporalClass) {
+        if (prm.getSubProfile() != null && !prm.getSubProfile().isBlank() && prm.getSubProfile().contains("BASE")) {
+            return prm.getSubProfile();
+        }
+
+        List<Long> pro5 = prmIdsByPoste.get("PRO5");
+        if(temporalClass.equals("BASE") && pro5 != null && pro5.contains(prm.getId())){
+            return "PRO5_BASE";
+        }
+
+        String mrType = temporalClass.length() == 3 && temporalClass.endsWith("B") ?
+                temporalClass.substring(0, 2) + "E" : temporalClass;
+
+        return getSubProfileMapping(mrType);
+    }
+
+    private String getSubProfileMapping(String meterReadingType) {
+        final String mrType = meterReadingType.length() == 3 && meterReadingType.endsWith("B") ?
+                meterReadingType.substring(0, 2) + "E" : meterReadingType;
+
+        return correlationTable.stream()
+                .filter(correlation -> correlation.getMeterReadingType().equals(mrType))
+                .map(CorrelationTable::getSubProfile)
+                .findFirst()
+                .orElseThrow(() -> new BusinessException("Mapping non trouvé pour le type de relève " + mrType));
+    }
+
+    private void validateParams(Map<String, Object> methodContext) {
+        String prmRefsParam = methodContext.getOrDefault(PRM_REFS_PARAM, "").toString().trim();
+        String rfpIdsParam = methodContext.getOrDefault(RFP_IDS_PARAM, "").toString().trim();
+        String threadCountParam = methodContext.getOrDefault(THREAD_COUNT_PARAM, "").toString().trim();
+        String memoryLimitParam = methodContext.getOrDefault(MEMORY_LIMIT_PARAM, "").toString().trim();
+        getC5Lisse = methodContext.getOrDefault(C5_LISSE, C5_LISSE_DISABLED).toString().trim();
+        if(!threadCountParam.isBlank()){
+            try {
+                threadCount = Integer.parseInt(threadCountParam);
+                if (threadCount <= 0) {
+                    throw new BusinessException("Le nombre de threads doit être supérieur à 0");
+                }
+            } catch (NumberFormatException e) {
+                throw new BusinessException("Le paramètre 'threadCount' doit être un entier valide");
+            }
+        }
+
+        if(!memoryLimitParam.isBlank()){
+            try {
+                memoryLimit = Double.parseDouble(memoryLimitParam);
+                if (memoryLimit <= 0) {
+                    throw new BusinessException("Le paramètre 'memoryLimit' doit être un nombre positif");
+                }
+            } catch (NumberFormatException e) {
+                throw new BusinessException("Le paramètre 'memoryLimit' doit être un nombre valide");
+            }
+        }
+
+        if(automaticJobLaunch) {
+            profilingType = ProfilingTypeEnum.DEFAULT;
+            return;
+        }
+
+        if (!prmRefsParam.isBlank() && !rfpIdsParam.isBlank()) {
+            throw new BusinessException("Sélectionner un unique champ PRM ou AO");
+        }
+
+        if (!prmRefsParam.isBlank()) {
+            prmRefs = getStringList(prmRefsParam);
+            profilingType = ProfilingTypeEnum.PRM;
+        }
+
+        if (!rfpIdsParam.isBlank()) {
+            rfpIds = getLongList(rfpIdsParam);
+            profilingType = ProfilingTypeEnum.RFP;
+        }
+    }
+
+    private List<String> getStringList(String curveIds) {
+        return Stream.of(curveIds.split(SEMI_COLON)).collect(Collectors.toList());
+    }
+
+    private List<Long> getLongList(String curveIds) {
+        return Stream.of(curveIds.split(SEMI_COLON))
+                .map(strCurveId -> {
+                    try {
+                        return Long.parseLong(strCurveId);
+                    } catch (NumberFormatException e) {
+                        throw new BusinessException("ID invalide " + strCurveId);
+                    }
+                })
+                .collect(Collectors.toList());
+    }
+
+    private synchronized void checkMemoryConsumption() {
+        long memoryUsed = (Runtime.getRuntime().totalMemory() - Runtime.getRuntime().freeMemory())/1000000000;
+
+        if (memoryUsed > memoryLimit) {
+            if(gcLaunchTime == 0 || (System.currentTimeMillis() - gcLaunchTime) > GC_INTERVAL * 1000) {
+                log.info("Memory usage is high: {} Gb used out of {} Gb ... Forcing garbage collection", memoryUsed, MAX_MEMORY);
+                forceGarbageCollection();
+                gcLaunchTime = System.currentTimeMillis();
+            } else {
+                log.info("Garbage collection already launched in the last {} seconds", GC_INTERVAL);
+            }
+        }
+    }
+
+    private void forceGarbageCollection() {
+        System.gc();
+        System.runFinalization();
+        System.gc();
+    }
+
+    private void setJobReportData(Map<String, Object> methodContext) {
+        if (!notFoundPrms.isEmpty()) {
+            report.rep("PRM non trouvés et pour lesquels la reconstitution n'a pas été faite : \n" + String.join(", ", notFoundPrms));
+        }
+
+        if (!notFoundRfps.isEmpty()) {
+            report.rep("AO non trouvés et pour lesquels la reconstitution n'a pas été faite : \n" + notFoundRfps);
+        }
+
+        if (!noMeasuresFoundPrms.isEmpty()) {
+            report.rep("PRM pour lesquels aucune mesure n'a été trouvée : \n" + String.join(", ", noMeasuresFoundPrms));
+        }
+
+        if (!noProfileCoeffFoundPrms.isEmpty()) {
+            report.rep("PRM pour lesquels les coefficients de profile n'ont pas été trouvés : \n" + String.join(", ", noProfileCoeffFoundPrms));
+        }
+
+        methodContext.put(JOB_RESULT_NB_WARN, warnCounter.get());
+        methodContext.put(JOB_RESULT_REPORT, report.getReportBuilder().toString());
+        methodContext.put(JOB_RESULT_NB_OK, okCounter.get());
+        methodContext.put(JOB_RESULT_NB_KO, koCounter.get());
+    }
+
+    /*  Utility classes */
+
+    private enum ProfilingTypeEnum {
+        PRM,
+        RFP,
+        DEFAULT
+    }
+
+    private static class ObjectNotFoundException extends Exception {
+        public ObjectNotFoundException(String message) {
+            super(message);
+        }
+    }
+
+    private static class NoMeasuresFoundException extends Exception {
+        public NoMeasuresFoundException(String message) {
+            super(message);
+        }
+    }
+
+    private static class ProfileCoeffNotFound extends BusinessException {
+        public ProfileCoeffNotFound(String message) {
+            super(message);
+        }
+    }
+
+    private static class UserDto extends MeveoUser {
+        public UserDto(MeveoUser meveoUser) {
+            super(meveoUser);
+        }
+        public boolean isForced() {
+            return this.forcedAuthentication;
+        }
+    }
+}
 
