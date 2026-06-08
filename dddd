@@ -1,7 +1,306 @@
-Hello,
+package com.masociete.maven;
 
-Pour les analyses du job, j’ai ajouté un commentaire dans le Jira avec quelques modifications à mettre en place rapidement. Elles présentent peu de risques de régression et sont relativement simples à implémenter.
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.maven.plugin.AbstractMojo;
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugins.annotations.Mojo;
+import org.apache.maven.plugins.annotations.Parameter;
 
-Si possible, pouvez-vous me partager la PR avant de la mettre en recette ?
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.util.Comparator;
+import java.util.stream.Stream;
 
-@Narimane, peux-tu également lier les différents tickets qui concernent le même sujet, s’il te plaît ? 😊
+@Mojo(name = "buildprod")
+public class BuildProdMojo extends AbstractMojo {
+
+    private static final String SRC_FOLDER = "src";
+    private static final String TARGET_FOLDER = "target";
+    private static final String GENERIC_FOLDER = "generic";
+    private static final String RELEASE_FOLDER = "release";
+    private static final String HOTFIX_FOLDER = "hotfix";
+
+    private static final String SQL_DATA_FOLDER = "sql-data";
+    private static final String SQL_STRUCT_FOLDER = "sql-struct";
+    private static final String POSTMAN_FOLDER = "postman";
+
+    private static final String SQL_EXTENSION = ".sql";
+    private static final String JSON_EXTENSION = ".json";
+
+    private static final String RELEASE_PREFIX = "release-";
+    private static final String DATA_SUFFIX = "-data.sql";
+    private static final String STRUCT_SUFFIX = "-struct.sql";
+    private static final String POSTMAN_SUFFIX = "-postman.json";
+
+    private static final String POSTMAN_SCHEMA =
+            "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
+
+    @Parameter(property = "prodVersion", required = true)
+    private String prodVersion;
+
+    @Parameter(property = "withGeneric", defaultValue = "false")
+    private boolean withGeneric;
+
+    @Parameter(defaultValue = "${project.basedir}", readonly = true)
+    private File basedir;
+
+    @Override
+    public void execute() throws MojoExecutionException {
+        try {
+            validateVersion(prodVersion);
+
+            Path base = basedir.toPath();
+            Path src = base.resolve(SRC_FOLDER);
+            Path sourceRelease = src.resolve(RELEASE_FOLDER);
+            Path targetRelease = base.resolve(TARGET_FOLDER).resolve(RELEASE_FOLDER);
+
+            if (withGeneric) {
+                generateOneFolder(
+                        src.resolve(GENERIC_FOLDER),
+                        targetRelease.resolve(GENERIC_FOLDER),
+                        GENERIC_FOLDER
+                );
+            }
+
+            Path versionRoot = sourceRelease.resolve(prodVersion);
+
+            if (!Files.exists(versionRoot)) {
+                throw new MojoExecutionException("Dossier version introuvable : " + versionRoot);
+            }
+
+            copyHotfixFolder(
+                    versionRoot.resolve(HOTFIX_FOLDER),
+                    targetRelease.resolve(prodVersion).resolve(HOTFIX_FOLDER)
+            );
+
+            try (Stream<Path> folders = Files.list(versionRoot)) {
+                folders
+                        .filter(Files::isDirectory)
+                        .filter(path -> !HOTFIX_FOLDER.equalsIgnoreCase(path.getFileName().toString()))
+                        .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                        .forEach(folder -> {
+                            try {
+                                String folderName = folder.getFileName().toString();
+
+                                generateOneFolder(
+                                        folder,
+                                        targetRelease.resolve(prodVersion).resolve(folderName),
+                                        prodVersion + "-" + folderName
+                                );
+
+                            } catch (Exception e) {
+                                throw new RuntimeException(e);
+                            }
+                        });
+            }
+
+            getLog().info("Génération terminée dans : " + targetRelease);
+
+        } catch (Exception e) {
+            throw new MojoExecutionException("Erreur pendant la génération release", e);
+        }
+    }
+
+    private void validateVersion(String version) throws MojoExecutionException {
+        if (version == null || version.trim().isEmpty()) {
+            throw new MojoExecutionException("Le paramètre prodVersion est obligatoire.");
+        }
+
+        if (!version.matches("\\d{2}\\.\\d{2}\\.\\d+")) {
+            throw new MojoExecutionException(
+                    "Version invalide : " + version + ". Exemple attendu : 26.06.0"
+            );
+        }
+    }
+
+    private void generateOneFolder(Path inputRoot, Path outputRoot, String releaseName)
+            throws IOException {
+
+        mergeTextFolder(
+                inputRoot.resolve(SQL_DATA_FOLDER),
+                outputRoot.resolve(RELEASE_PREFIX + releaseName + DATA_SUFFIX),
+                SQL_EXTENSION
+        );
+
+        mergeTextFolder(
+                inputRoot.resolve(SQL_STRUCT_FOLDER),
+                outputRoot.resolve(RELEASE_PREFIX + releaseName + STRUCT_SUFFIX),
+                SQL_EXTENSION
+        );
+
+        mergePostmanCollections(
+                inputRoot.resolve(POSTMAN_FOLDER),
+                outputRoot.resolve(RELEASE_PREFIX + releaseName + POSTMAN_SUFFIX),
+                "Release " + releaseName
+        );
+    }
+
+    private void mergeTextFolder(Path inputFolder, Path outputFile, String extension)
+            throws IOException {
+
+        if (!Files.exists(inputFolder)) {
+            getLog().warn("Dossier ignoré : " + inputFolder);
+            return;
+        }
+
+        StringBuilder result = new StringBuilder();
+
+        try (Stream<Path> files = Files.list(inputFolder)) {
+            files
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.toString().toLowerCase().endsWith(extension))
+                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                    .forEach(path -> appendSqlFile(result, path));
+        }
+
+        if (result.toString().trim().isEmpty()) {
+            getLog().info("Aucun contenu SQL à générer pour : " + outputFile);
+            return;
+        }
+
+        Files.createDirectories(outputFile.getParent());
+
+        Files.writeString(
+                outputFile,
+                result.toString(),
+                StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING
+        );
+
+        getLog().info("Fichier SQL créé : " + outputFile);
+    }
+
+    private void appendSqlFile(StringBuilder result, Path path) {
+        try {
+            String content = Files.readString(path, StandardCharsets.UTF_8);
+
+            if (content.trim().isEmpty()) {
+                getLog().warn("Fichier SQL vide ignoré : " + path.getFileName());
+                return;
+            }
+
+            String fileName = path.getFileName().toString();
+
+            result.append(System.lineSeparator());
+            result.append("-- =============================================").append(System.lineSeparator());
+            result.append("-- FILE : ").append(fileName).append(System.lineSeparator());
+            result.append("-- =============================================").append(System.lineSeparator());
+            result.append(System.lineSeparator());
+
+            result.append(content);
+            result.append(System.lineSeparator()).append(System.lineSeparator());
+
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur lecture fichier SQL : " + path, e);
+        }
+    }
+
+    private void mergePostmanCollections(Path inputFolder,
+                                         Path outputFile,
+                                         String collectionName) throws IOException {
+
+        if (!Files.exists(inputFolder)) {
+            getLog().warn("Dossier ignoré : " + inputFolder);
+            return;
+        }
+
+        ObjectMapper mapper = new ObjectMapper();
+
+        ObjectNode root = mapper.createObjectNode();
+
+        ObjectNode info = mapper.createObjectNode();
+        info.put("name", collectionName);
+        info.put("schema", POSTMAN_SCHEMA);
+        root.set("info", info);
+
+        ArrayNode mergedItems = mapper.createArrayNode();
+
+        try (Stream<Path> files = Files.list(inputFolder)) {
+            files
+                    .filter(Files::isRegularFile)
+                    .filter(path -> path.toString().toLowerCase().endsWith(JSON_EXTENSION))
+                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
+                    .forEach(path -> appendPostmanItems(mapper, mergedItems, path));
+        }
+
+        if (mergedItems.isEmpty()) {
+            getLog().info("Aucun item Postman à générer pour : " + outputFile);
+            return;
+        }
+
+        root.set("item", mergedItems);
+
+        Files.createDirectories(outputFile.getParent());
+
+        mapper.writerWithDefaultPrettyPrinter()
+                .writeValue(outputFile.toFile(), root);
+
+        getLog().info("Collection Postman créée : " + outputFile);
+    }
+
+    private void appendPostmanItems(ObjectMapper mapper, ArrayNode mergedItems, Path path) {
+        try {
+            JsonNode json = mapper.readTree(path.toFile());
+
+            if (!json.has("item") || !json.get("item").isArray()) {
+                getLog().warn("Fichier Postman ignoré, pas de tableau item : " + path);
+                return;
+            }
+
+            if (json.get("item").isEmpty()) {
+                getLog().warn("Fichier Postman vide ignoré : " + path.getFileName());
+                return;
+            }
+
+            json.get("item").forEach(mergedItems::add);
+
+            getLog().info("Items Postman ajoutés depuis : " + path.getFileName());
+
+        } catch (IOException e) {
+            throw new RuntimeException("Erreur lecture JSON Postman : " + path, e);
+        }
+    }
+
+    private void copyHotfixFolder(Path sourceHotfix, Path targetHotfix) throws IOException {
+
+        if (!Files.exists(sourceHotfix)) {
+            getLog().warn("Dossier hotfix ignoré car introuvable : " + sourceHotfix);
+            return;
+        }
+
+        copyDirectory(sourceHotfix, targetHotfix);
+
+        getLog().info("Dossier hotfix copié vers : " + targetHotfix);
+    }
+
+    private void copyDirectory(Path source, Path target) throws IOException {
+
+        try (Stream<Path> paths = Files.walk(source)) {
+            paths.forEach(sourcePath -> {
+                try {
+                    Path targetPath = target.resolve(source.relativize(sourcePath));
+
+                    if (Files.isDirectory(sourcePath)) {
+                        Files.createDirectories(targetPath);
+                    } else {
+                        Files.createDirectories(targetPath.getParent());
+                        Files.copy(
+                                sourcePath,
+                                targetPath,
+                                StandardCopyOption.REPLACE_EXISTING
+                        );
+                    }
+
+                } catch (IOException e) {
+                    throw new RuntimeException("Erreur copie fichier : " + sourcePath, e);
+                }
+            });
+        }
+    }
+}
