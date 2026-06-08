@@ -139,3 +139,161 @@ Le plus gros gain viendra de ces deux changements :
 2. Cacher les templates déjà convertis
 
 Ça peut diviser la mémoire par plusieurs fois et réduire fortement les allocations GC.
+
+
+
+:::writing{variant=“document” id=“74182”}
+
+Optimisation mémoire du batch ACDC
+
+Priorité 1 — Mise en cache des templates de référence
+
+Constat
+
+Les courbes de référence (templates) sont chargées depuis la base avec des données binaires pouvant atteindre plusieurs Mo. Ces données sont ensuite converties plusieurs fois au cours du traitement :
+
+byte[] -> convertBytesToDoubles() -> calculs -> convertDoublesToBytes()
+
+Or ces courbes sont des données de référence qui évoluent peu et sont utilisées de nombreuses fois dans le batch.
+
+Solution
+
+Mettre en place un cache applicatif des templates déjà convertis.
+
+Map<TemplateKey, double[]>
+
+Clé :
+
+profileId + subProfile + type
+
+Valeur :
+
+double[]
+
+Exemple :
+
+private final Map<TemplateKey, double[]> templateCache = new ConcurrentHashMap<>();
+
+public double[] getTemplate(TemplateKey key, byte[] binaryData) {
+    return templateCache.computeIfAbsent(
+        key,
+        k -> convertBytesToDoubleArray(binaryData)
+    );
+}
+
+Le batch récupère alors directement le template converti :
+
+double[] template = templateCache.get(key);
+
+et effectue une copie uniquement si une modification est nécessaire :
+
+double[] workingCopy = Arrays.copyOf(template, template.length);
+
+Gain attendu
+	•	Suppression des conversions répétées.
+	•	Réduction importante des allocations mémoire.
+	•	Réduction du temps CPU.
+
+⸻
+
+Priorité 2 — Remplacement de List par double[]
+
+Constat
+
+Les CDC utilisent actuellement :
+
+List<Double>
+
+Chaque valeur est encapsulée dans un objet Double, ce qui génère :
+	•	de nombreux objets Java ;
+	•	davantage de consommation mémoire ;
+	•	davantage d’activité GC.
+
+Exemple :
+
+private List<Double> cdcPuissances;
+
+Solution
+
+Remplacer :
+
+private List<Double> cdcPuissances;
+
+par :
+
+private double[] cdcPuissances;
+
+Adapter les conversions :
+
+byte[] -> double[]
+double[] -> byte[]
+
+et remplacer les opérations de liste :
+
+add()
+addAll()
+get()
+set()
+
+par :
+
+Arrays.copyOf(...)
+System.arraycopy(...)
+cdcPuissances[index]
+
+Gain attendu
+	•	Réduction importante de la mémoire consommée.
+	•	Réduction du nombre d’objets créés.
+	•	Réduction de la pression GC.
+	•	Calculs plus rapides.
+
+⸻
+
+Priorité 3 — Réévaluation du parallélisme
+
+Constat
+
+Le batch utilise des traitements parallèles :
+
+parallelStream()
+
+ou des traitements ForkJoinPool.
+
+Sur des structures volumineuses :
+
+double[]
+byte[]
+CDC
+
+le parallélisme peut :
+	•	multiplier les allocations ;
+	•	augmenter la pression mémoire ;
+	•	augmenter l’activité GC ;
+	•	dégrader les performances globales.
+
+Solution
+
+Tester les traitements :
+
+parallelStream()
+
+contre :
+
+stream()
+
+ou des boucles classiques :
+
+for (...)
+
+Conserver le parallélisme uniquement lorsqu’il apporte un gain mesurable.
+
+Gain attendu
+	•	Stabilisation de la consommation mémoire.
+	•	Réduction des pics observés pendant le batch.
+	•	Meilleure maîtrise des ressources JVM.
+:::
+
+Ordre recommandé d’implémentation :
+	1.	Cache applicatif des templates → gain immédiat et risque faible.
+	2.	Migration List<Double> → double[] → gain mémoire majeur mais impact de code plus important.
+	3.	Réévaluation du parallelStream() → à mesurer après les deux optimisations précédentes.
