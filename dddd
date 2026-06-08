@@ -1,321 +1,224 @@
-package com.masociete.maven;
-
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
-
-import java.io.File;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.*;
-import java.util.Comparator;
-import java.util.stream.Stream;
-
-@Mojo(name = "buildprod")
-public class BuildProdMojo extends AbstractMojo {
-
-    private static final String SRC_FOLDER = "src";
-    private static final String TARGET_FOLDER = "target";
-    private static final String GENERIC_FOLDER = "generic";
-    private static final String RELEASE_FOLDER = "release";
-    private static final String HOTFIX_FOLDER = "hotfix";
-
-    private static final String SQL_FOLDER = "sql";
-    private static final String SQL_DATA_FOLDER = "sql-data";
-    private static final String SQL_STRUCT_FOLDER = "sql-struct";
-    private static final String POSTMAN_FOLDER = "postman";
-
-    private static final String SQL_EXTENSION = ".sql";
-    private static final String JSON_EXTENSION = ".json";
-
-    private static final String RELEASE_PREFIX = "release-";
-    private static final String SQL_SUFFIX = "-sql.sql";
-    private static final String DATA_SUFFIX = "-data.sql";
-    private static final String STRUCT_SUFFIX = "-struct.sql";
-    private static final String POSTMAN_SUFFIX = "-postman.json";
-
-    private static final String POSTMAN_SCHEMA =
-            "https://schema.getpostman.com/json/collection/v2.1.0/collection.json";
-
-    @Parameter(property = "prodVersion", required = true)
-    private String prodVersion;
-
-    @Parameter(property = "withGeneric", defaultValue = "false")
-    private boolean withGeneric;
-
-    @Parameter(defaultValue = "${project.basedir}", readonly = true)
-    private File basedir;
-
-    @Override
-    public void execute() throws MojoExecutionException {
-        try {
-            validateVersion(prodVersion);
-
-            Path base = basedir.toPath();
-            Path src = base.resolve(SRC_FOLDER);
-            Path sourceRelease = src.resolve(RELEASE_FOLDER);
-            Path targetRelease = base.resolve(TARGET_FOLDER).resolve(RELEASE_FOLDER);
-
-            if (withGeneric) {
-                generateGenericFolder(
-                        src.resolve(GENERIC_FOLDER),
-                        targetRelease.resolve(GENERIC_FOLDER),
-                        GENERIC_FOLDER
-                );
-            }
-
-            Path versionRoot = sourceRelease.resolve(prodVersion);
-
-            if (!Files.exists(versionRoot)) {
-                throw new MojoExecutionException("Dossier version introuvable : " + versionRoot);
-            }
-
-            copyHotfixFolder(
-                    versionRoot.resolve(HOTFIX_FOLDER),
-                    targetRelease.resolve(prodVersion).resolve(HOTFIX_FOLDER)
-            );
-
-            try (Stream<Path> folders = Files.list(versionRoot)) {
-                folders
-                        .filter(Files::isDirectory)
-                        .filter(path -> !HOTFIX_FOLDER.equalsIgnoreCase(path.getFileName().toString()))
-                        .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                        .forEach(folder -> {
-                            try {
-                                String folderName = folder.getFileName().toString();
-
-                                generateReleaseFolder(
-                                        folder,
-                                        targetRelease.resolve(prodVersion).resolve(folderName),
-                                        prodVersion + "-" + folderName
-                                );
-
-                            } catch (Exception e) {
-                                throw new RuntimeException(e);
-                            }
-                        });
-            }
-
-            getLog().info("Génération terminée dans : " + targetRelease);
-
-        } catch (Exception e) {
-            throw new MojoExecutionException("Erreur pendant la génération release", e);
-        }
-    }
-
-    private void validateVersion(String version) throws MojoExecutionException {
-        if (version == null || version.trim().isEmpty()) {
-            throw new MojoExecutionException("Le paramètre prodVersion est obligatoire.");
-        }
-
-        if (!version.matches("\\d{2}\\.\\d{2}\\.\\d+")) {
-            throw new MojoExecutionException(
-                    "Version invalide : " + version + ". Exemple attendu : 26.06.0"
-            );
-        }
-    }
-
-    private void generateGenericFolder(Path inputRoot, Path outputRoot, String releaseName)
-            throws IOException {
-
-        mergeTextFolder(
-                inputRoot.resolve(SQL_FOLDER),
-                outputRoot.resolve(RELEASE_PREFIX + releaseName + SQL_SUFFIX),
-                SQL_EXTENSION
-        );
-
-        mergePostmanCollections(
-                inputRoot.resolve(POSTMAN_FOLDER),
-                outputRoot.resolve(RELEASE_PREFIX + releaseName + POSTMAN_SUFFIX),
-                "Release " + releaseName
-        );
-    }
-
-    private void generateReleaseFolder(Path inputRoot, Path outputRoot, String releaseName)
-            throws IOException {
-
-        mergeTextFolder(
-                inputRoot.resolve(SQL_DATA_FOLDER),
-                outputRoot.resolve(RELEASE_PREFIX + releaseName + DATA_SUFFIX),
-                SQL_EXTENSION
-        );
-
-        mergeTextFolder(
-                inputRoot.resolve(SQL_STRUCT_FOLDER),
-                outputRoot.resolve(RELEASE_PREFIX + releaseName + STRUCT_SUFFIX),
-                SQL_EXTENSION
-        );
-
-        mergePostmanCollections(
-                inputRoot.resolve(POSTMAN_FOLDER),
-                outputRoot.resolve(RELEASE_PREFIX + releaseName + POSTMAN_SUFFIX),
-                "Release " + releaseName
-        );
-    }
-
-    private void mergeTextFolder(Path inputFolder, Path outputFile, String extension)
-            throws IOException {
-
-        if (!Files.exists(inputFolder)) {
-            getLog().warn("Dossier ignoré : " + inputFolder);
-            return;
-        }
-
-        StringBuilder result = new StringBuilder();
-
-        try (Stream<Path> files = Files.list(inputFolder)) {
-            files
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().toLowerCase().endsWith(extension))
-                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                    .forEach(path -> appendSqlFile(result, path));
-        }
-
-        if (result.toString().trim().isEmpty()) {
-            getLog().info("Aucun contenu SQL à générer pour : " + outputFile);
-            return;
-        }
-
-        Files.createDirectories(outputFile.getParent());
-
-        Files.writeString(
-                outputFile,
-                result.toString(),
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
-
-        getLog().info("Fichier SQL créé : " + outputFile);
-    }
-
-    private void appendSqlFile(StringBuilder result, Path path) {
-        try {
-            String content = Files.readString(path, StandardCharsets.UTF_8);
-
-            if (content.trim().isEmpty()) {
-                getLog().warn("Fichier SQL vide ignoré : " + path.getFileName());
-                return;
-            }
-
-            result.append(System.lineSeparator());
-            result.append("-- =============================================").append(System.lineSeparator());
-            result.append("-- FILE : ").append(path.getFileName()).append(System.lineSeparator());
-            result.append("-- =============================================").append(System.lineSeparator());
-            result.append(System.lineSeparator());
-            result.append(content);
-            result.append(System.lineSeparator()).append(System.lineSeparator());
-
-        } catch (IOException e) {
-            throw new RuntimeException("Erreur lecture fichier SQL : " + path, e);
-        }
-    }
-
-    private void mergePostmanCollections(Path inputFolder,
-                                         Path outputFile,
-                                         String collectionName) throws IOException {
-
-        if (!Files.exists(inputFolder)) {
-            getLog().warn("Dossier ignoré : " + inputFolder);
-            return;
-        }
-
-        ObjectMapper mapper = new ObjectMapper();
-
-        ObjectNode root = mapper.createObjectNode();
-
-        ObjectNode info = mapper.createObjectNode();
-        info.put("name", collectionName);
-        info.put("schema", POSTMAN_SCHEMA);
-        root.set("info", info);
-
-        ArrayNode mergedItems = mapper.createArrayNode();
-
-        try (Stream<Path> files = Files.list(inputFolder)) {
-            files
-                    .filter(Files::isRegularFile)
-                    .filter(path -> path.toString().toLowerCase().endsWith(JSON_EXTENSION))
-                    .sorted(Comparator.comparing(path -> path.getFileName().toString()))
-                    .forEach(path -> appendPostmanItems(mapper, mergedItems, path));
-        }
-
-        if (mergedItems.isEmpty()) {
-            getLog().info("Aucun item Postman à générer pour : " + outputFile);
-            return;
-        }
-
-        root.set("item", mergedItems);
-
-        Files.createDirectories(outputFile.getParent());
-
-        mapper.writerWithDefaultPrettyPrinter()
-                .writeValue(outputFile.toFile(), root);
-
-        getLog().info("Collection Postman créée : " + outputFile);
-    }
-
-    private void appendPostmanItems(ObjectMapper mapper, ArrayNode mergedItems, Path path) {
-        try {
-            JsonNode json = mapper.readTree(path.toFile());
-
-            if (!json.has("item") || !json.get("item").isArray()) {
-                getLog().warn("Fichier Postman ignoré, pas de tableau item : " + path);
-                return;
-            }
-
-            if (json.get("item").isEmpty()) {
-                getLog().warn("Fichier Postman vide ignoré : " + path.getFileName());
-                return;
-            }
-
-            json.get("item").forEach(mergedItems::add);
-
-            getLog().info("Items Postman ajoutés depuis : " + path.getFileName());
-
-        } catch (IOException e) {
-            throw new RuntimeException("Erreur lecture JSON Postman : " + path, e);
-        }
-    }
-
-    private void copyHotfixFolder(Path sourceHotfix, Path targetHotfix) throws IOException {
-
-        if (!Files.exists(sourceHotfix)) {
-            getLog().warn("Dossier hotfix ignoré car introuvable : " + sourceHotfix);
-            return;
-        }
-
-        copyDirectory(sourceHotfix, targetHotfix);
-
-        getLog().info("Dossier hotfix copié vers : " + targetHotfix);
-    }
-
-    private void copyDirectory(Path source, Path target) throws IOException {
-
-        try (Stream<Path> paths = Files.walk(source)) {
-            paths.forEach(sourcePath -> {
-                try {
-                    Path targetPath = target.resolve(source.relativize(sourcePath));
-
-                    if (Files.isDirectory(sourcePath)) {
-                        Files.createDirectories(targetPath);
-                    } else {
-                        Files.createDirectories(targetPath.getParent());
-                        Files.copy(
-                                sourcePath,
-                                targetPath,
-                                StandardCopyOption.REPLACE_EXISTING
-                        );
-                    }
-
-                } catch (IOException e) {
-                    throw new RuntimeException("Erreur copie fichier : " + sourcePath, e);
-                }
-            });
-        }
-    }
+:::writing{variant=“document” id=“48172”}
+
+Plugin Maven de Préparation des Livraisons
+
+Contexte
+
+La préparation des livraisons nécessite aujourd’hui plusieurs opérations manuelles :
+	•	Regroupement des scripts SQL de structure.
+	•	Regroupement des scripts SQL de données.
+	•	Consolidation des collections Postman.
+	•	Organisation des livrables selon les différents contextes applicatifs (B2B, B2C, composants communs).
+	•	Vérification manuelle de la cohérence des artefacts produits.
+
+Ces tâches sont chronophages et peuvent être sources d’erreurs ou d’oublis lors de la préparation des mises en production.
+
+Afin de standardiser et fiabiliser ce processus, un plugin Maven a été développé pour automatiser la génération des artefacts de livraison.
+
+⸻
+
+Objectifs
+
+Le plugin a pour objectif de :
+	•	Standardiser l’organisation des livrables.
+	•	Réduire les manipulations manuelles.
+	•	Limiter les risques d’erreurs lors de la préparation des releases.
+	•	Faciliter les revues techniques et les déploiements.
+	•	Produire des artefacts homogènes et reproductibles.
+
+⸻
+
+Principe de fonctionnement
+
+Le plugin s’inspire du principe utilisé par OpenCell pour la génération des collections de scripts Java.
+
+À partir d’une simple commande Maven, le plugin :
+	•	Analyse l’arborescence de release.
+	•	Agrège les scripts SQL.
+	•	Fusionne les collections Postman.
+	•	Copie les éventuels correctifs (Hotfix).
+	•	Génère automatiquement un dossier de livraison complet dans le répertoire target.
+
+Commande d’exécution :
+
+mvn test:buildprod -DprodVersion=26.06.0 -DwithGeneric=true
+
+
+⸻
+
+Paramètres
+
+Paramètre	Description	Obligatoire
+prodVersion	Version de la release à générer	Oui
+withGeneric	Génération des composants communs (Generic)	Non
+
+Exemple :
+
+mvn test:buildprod -DprodVersion=26.06.0 -DwithGeneric=true
+
+
+⸻
+
+Structure des sources
+
+Dossier Generic
+
+src/
+└── generic
+    ├── sql
+    └── postman
+
+Le dossier Generic contient les éléments communs à toutes les applications.
+
+⸻
+
+Dossier Release
+
+src/
+└── release
+    └── 26.06.0
+        ├── hotfix
+        ├── 1-Both
+        │   ├── sql-data
+        │   ├── sql-struct
+        │   └── postman
+        ├── 2-B2C
+        │   ├── sql-data
+        │   ├── sql-struct
+        │   └── postman
+        └── 3-B2B
+            ├── sql-data
+            ├── sql-struct
+            └── postman
+
+
+⸻
+
+Génération des scripts SQL
+
+Le plugin consolide automatiquement les fichiers SQL présents dans les répertoires :
+
+sql-data
+sql-struct
+
+Les scripts sont concaténés dans l’ordre alphabétique.
+
+Pour faciliter la traçabilité, le nom du fichier source est ajouté sous forme de commentaire SQL :
+
+-- =============================================
+-- FILE : update_customer_status.sql
+-- =============================================
+
+UPDATE customer
+SET status = 'ACTIVE';
+
+
+⸻
+
+Génération des collections Postman
+
+Le plugin fusionne automatiquement l’ensemble des collections Postman présentes dans un dossier.
+
+Chaque fichier :
+
+postman/
+ ├── customer.json
+ ├── billing.json
+ └── subscription.json
+
+est analysé puis les différents objets item sont regroupés dans une collection unique.
+
+Exemple :
+
+{
+  "info": {
+    "name": "Release 26.06.0-1-B2B"
+  },
+  "item": [
+    ...
+  ]
 }
+
+Cette collection peut être directement importée dans Postman.
+
+⸻
+
+Gestion des Hotfix
+
+Un dossier hotfix peut être présent directement sous la release :
+
+release/
+└── 26.06.0
+    └── hotfix
+
+Le contenu de ce dossier n’est pas transformé.
+
+Le plugin réalise simplement une copie vers le dossier de livraison généré :
+
+target/release/26.06.0/hotfix
+
+
+⸻
+
+Gestion des fichiers vides
+
+Afin d’éviter la génération d’artefacts inutiles :
+	•	Les fichiers SQL vides sont ignorés.
+	•	Les collections Postman sans item sont ignorées.
+	•	Aucun fichier n’est généré lorsqu’aucun contenu exploitable n’est détecté.
+
+⸻
+
+Résultat généré
+
+Exemple de structure produite :
+
+target/
+└── release
+    ├── generic
+    │   ├── release-generic-sql.sql
+    │   └── release-generic-postman.json
+    │
+    └── 26.06.0
+        ├── hotfix
+        │
+        ├── 1-Both
+        │   ├── release-26.06.0-1-Both-data.sql
+        │   ├── release-26.06.0-1-Both-struct.sql
+        │   └── release-26.06.0-1-Both-postman.json
+        │
+        ├── 2-B2C
+        │   ├── release-26.06.0-2-B2C-data.sql
+        │   ├── release-26.06.0-2-B2C-struct.sql
+        │   └── release-26.06.0-2-B2C-postman.json
+        │
+        └── 3-B2B
+            ├── release-26.06.0-3-B2B-data.sql
+            ├── release-26.06.0-3-B2B-struct.sql
+            └── release-26.06.0-3-B2B-postman.json
+
+
+⸻
+
+Bénéfices
+	•	Une seule commande pour générer l’ensemble des livrables.
+	•	Standardisation des releases.
+	•	Réduction des manipulations manuelles.
+	•	Diminution des risques d’erreurs et d’oublis.
+	•	Amélioration de la traçabilité des scripts.
+	•	Consolidation automatique des collections Postman.
+	•	Gain de temps pour les équipes de développement, de recette et de déploiement.
+	•	Artefacts homogènes, reproductibles et prêts à être utilisés lors des mises en production.
+
+⸻
+
+Perspectives
+
+Dans le cadre de l’amélioration continue du processus de livraison, il est également proposé :
+	•	De protéger la branche de pré-production.
+	•	De rejouer les scripts de mise en production sur l’environnement de pré-production au moins une semaine avant la MEP.
+	•	D’exécuter les TNR et les tests de performance sur cette version candidate.
+	•	De valider l’ensemble des artefacts générés avant le passage en production.
+
+Cette approche permet de sécuriser davantage les mises en production et de détecter plus tôt d’éventuelles anomalies.
+:::
