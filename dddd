@@ -1,47 +1,11 @@
-uAtomicReference<CdcOptimized> templateCdcRef = new AtomicReference<>();
+CdcOptimized templateCdc = templateCdcRef.get();
 
-targetClasses.parallelStream().forEach(tempClassTarget -> {
-    try {
-        checkMemoryConsumptionDebug("Debug 10");
+if (templateCdc == null) {
+    CdcOptimized newTemplateCdc = buildTemplateCdc(...);
 
-        handleMeterReading(
-            prm,
-            mr,
-            cdcMap,
-            tempClassTarget,
-            templateCdcRef
-        );
-
-    } catch (ProfileCoeffNotFound e) {
-        log.info("Profile not found ...");
-    } catch (Exception e) {
-        throw new RuntimeException(e);
+    if (templateCdcRef.compareAndSet(null, newTemplateCdc)) {
+        templateCdc = newTemplateCdc;
+    } else {
+        templateCdc = templateCdcRef.get();
     }
-
-    checkMemoryConsumptionDebug("Debug 11");
-});
-
-AtomicReference<CdcOptimized> templateCdcRef = new AtomicReference<>();
-
-targetClasses.parallelStream().forEach(tempClassTarget -> {
-    try {
-        checkMemoryConsumptionDebug("Debug 10");
-
-        handleMeterReading(
-            prm,
-            mr,
-            cdcMap,
-            tempClassTarget,
-            templateCdcRef
-        );
-
-    } catch (ProfileCoeffNotFound e) {
-        log.info("Profile not found ...");
-    } catch (Exception e) {
-        throw new RuntimeException(e);
-    }
-
-    checkMemoryConsumptionDebug("Debug 11");
-});
-
-import java.util.concurrent.atomic.AtomicReference;
+}
