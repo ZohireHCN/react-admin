@@ -1,66 +1,34 @@
-public CdcOptimized getReducedCdc(ZonedDateTime start, ZonedDateTime end) {
-            CdcOptimized r = new CdcOptimized();
-            int si = getReducedStartDateIndex(start), ei = getReducedEndDateIndex(end);
-            r.curve = new Curve();
-            r.curve.setStartDate(start); r.curve.setEndDate(end); r.curve.setStep(cdcPas);
-            r.curve.setBinaryCurve(new BinaryCurve());
-            r.curve.getBinaryCurve().setCurve(r.curve);
-            r.cdcDates    = new ArrayList<>(cdcDates.subList(si, ei + 1));
-            r.puissances  = Arrays.copyOfRange(puissances, si, ei + 1);   // copie isolée ← safe à muter
-            r.curve.getBinaryCurve().setData(convertDoublesToBytes(r.puissances));
-            r.cdcDateDebut = start; r.cdcDateFin = end; r.cdcPas = cdcPas;
-            return r;
+public void extendCdc(ZonedDateTime debut, ZonedDateTime fin, Double defaultValue) {
+            if (debut.isEqual(cdcDateDebut) && fin.isEqual(cdcDateFin)) return;
+            double fillVal = (defaultValue == null) ? MISSING : defaultValue;
+            ZonedDateTime startDate = cdcDateDebut.isBefore(debut) || cdcDateDebut.isEqual(debut) ? cdcDateDebut : debut;
+            ZonedDateTime endDate   = cdcDateFin.isAfter(fin)      || cdcDateFin.isEqual(fin)     ? cdcDateFin   : fin;
+            int stepMin = cdcPas.getDurationInMinutes();
+            List<ZonedDateTime> newDates  = new ArrayList<>();
+            List<double[]>      newChunks = new ArrayList<>();
+            if (startDate.isBefore(cdcDateDebut)) {
+                ZonedDateTime cur = startDate;
+                int cnt = 0;
+                while (cur.isBefore(cdcDateDebut)) { newDates.add(cur); cnt++; cur = (cdcPas == StepEnum.Journalier) ? cur.plusDays(1) : cur.plusMinutes(stepMin); }
+                newChunks.add(allocate(cnt, fillVal));
+                newDates.addAll(cdcDates);
+                newChunks.add(puissances);
+            } else {
+                newDates.addAll(cdcDates);
+                newChunks.add(puissances);
+            }
+            if (endDate.isAfter(cdcDateFin)) {
+                ZonedDateTime cur = (cdcPas == StepEnum.Journalier) ? cdcDateFin.plusDays(1) : cdcDateFin.plusMinutes(stepMin);
+                List<ZonedDateTime> post = new ArrayList<>();
+                while (!cur.isAfter(endDate)) { post.add(cur); cur = (cdcPas == StepEnum.Journalier) ? cur.plusDays(1) : cur.plusMinutes(stepMin); }
+                newChunks.add(allocate(post.size(), fillVal));
+                newDates.addAll(post);
+            }
+            int total = newChunks.stream().mapToInt(a -> a.length).sum();
+            double[] merged = new double[total];
+            int pos = 0;
+            for (double[] chunk : newChunks) { System.arraycopy(chunk, 0, merged, pos, chunk.length); pos += chunk.length; }
+            cdcDates   = newDates;
+            puissances = merged;
+            setStartEndDates();
         }
-
-
-public static CdcOptimized changerPas(CdcOptimized cdc, StepEnum step) {
-            StepEnum old=cdc.getCdcPas();
-            if ((old==StepEnum.QuinzeMinutes&&step==StepEnum.DixMinutes)||(old==StepEnum.DixMinutes&&step==StepEnum.QuinzeMinutes)) { cdc=changerPas(cdc,StepEnum.CinqMinutes); old=StepEnum.CinqMinutes; }
-            if (old==StepEnum.Journalier||step==StepEnum.Journalier) return changerPasJournalier(cdc,step);
-            int oldN=calculerNbPtsParHeure(old), newN=calculerNbPtsParHeure(step);
-            if (cdc.getCurve()!=null) cdc.getCurve().setStep(step);
-            cdc.setCdcPas(step);
-            double[] o=cdc.puissances; double[] np;
-            long totalMin=ChronoUnit.MINUTES.between(cdc.getCdcDateDebut(),cdc.getCdcDateFin()); int newCount=(int)(totalMin/step.getDurationInMinutes())+1;
-            if (newN<oldN) { int f=oldN/newN, bk=(o.length+f-1)/f; np=new double[bk]; for (int i=0;i<bk;i++) { double s=0;int c=0; for (int j=0;j<f&&(i*f+j)<o.length;j++) { double v=o[i*f+j]; if (!isMissing(v)){s+=v;c++;} } np[i]=c==0?MISSING:s/c; } }
-            else if (newN>oldN) { int f=newN/oldN; np=new double[o.length*f]; for (int i=0;i<o.length;i++) Arrays.fill(np,i*f,i*f+f,o[i]); }
-            else { np=Arrays.copyOf(o,o.length); }
-            if (np.length>newCount) np=Arrays.copyOf(np,newCount);
-            else if (np.length<newCount) { int prev=np.length; np=Arrays.copyOf(np,newCount); Arrays.fill(np,prev,newCount,o.length>0?o[o.length-1]:MISSING); }
-            cdc.puissances=np; cdc.reconstruireDates(np.length);
-            if (cdc.getCurve()!=null&&cdc.getCurve().getBinaryCurve()!=null) { cdc.getCurve().getBinaryCurve().setData(convertDoublesToBytes(np)); cdc.getCurve().setStartDate(cdc.getCdcDateDebut()); cdc.getCurve().setEndDate(cdc.getCdcDateFin()); }
-            return cdc;
-        }
-
-public void multiplyBy(Double factor) {
-            if (factor==null) return;
-            double f=factor;
-            for (int i=0; i<puissances.length; i++) if (!isMissing(puissances[i])) puissances[i]*=f;
-        }
-
-public void mergeCdcAndIgnoreDiscontinuity(CdcOptimized other, Double defaultValue) {
-            extendCdc(other.getCdcDateDebut(),other.getCdcDateFin(),defaultValue);
-            int si=getReducedStartDateIndex(other.getCdcDateDebut()), ei=getReducedEndDateIndex(other.getCdcDateFin());
-            double[] src=other.puissances;
-            IntStream.range(si,ei+1).parallel().forEach(i->{ double v=src[i-si]; if (!isMissing(v)) puissances[i]=v; });
-            curve.getBinaryCurve().setData(convertDoublesToBytes(puissances));
-        }
-
-public void mergeCdc(CdcOptimized other, boolean overwrite) {
-            if (!Objects.equals(cdcPas.getId(),other.getCdcPas().getId())) unifyStep(this,other);
-            if (!datesAreContinuous(other)) throw new BusinessException("Discontinuous dates detected.");
-            List<ZonedDateTime> nd=other.getCdcDates(), ed=this.cdcDates; double[] np=other.puissances, ep=this.puissances;
-            List<ZonedDateTime> md=new ArrayList<>(); List<Double> mv=new ArrayList<>(); int ni=0, ei2=0;
-            while (ni<nd.size()&&ei2<ed.size()) { ZonedDateTime a=nd.get(ni),b=ed.get(ei2); if (a.isBefore(b)){md.add(a);mv.add(isMissing(np[ni])?null:np[ni]);ni++;} else if (a.isAfter(b)){md.add(b);mv.add(isMissing(ep[ei2])?null:ep[ei2]);ei2++;} else {md.add(a);if((overwrite&&!isMissing(np[ni]))||isMissing(ep[ei2])){mv.add(isMissing(np[ni])?null:np[ni]);}else{mv.add(isMissing(ep[ei2])?null:ep[ei2]);}ni++;ei2++;} }
-            while (ni<nd.size()){md.add(nd.get(ni));mv.add(isMissing(np[ni])?null:np[ni]);ni++;}
-            while (ei2<ed.size()){md.add(ed.get(ei2));mv.add(isMissing(ep[ei2])?null:ep[ei2]);ei2++;}
-            this.cdcDates=md; this.puissances=fromList(mv);
-            this.curve.getBinaryCurve().setData(convertDoublesToBytes(this.puissances));
-            setStartEndDates(); reconstruireDates(); calculateCurveTotals();
-        }
-
-
-
-
-
-
