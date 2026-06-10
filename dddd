@@ -1,34 +1,74 @@
 public void extendCdc(ZonedDateTime debut, ZonedDateTime fin, Double defaultValue) {
-            if (debut.isEqual(cdcDateDebut) && fin.isEqual(cdcDateFin)) return;
-            double fillVal = (defaultValue == null) ? MISSING : defaultValue;
-            ZonedDateTime startDate = cdcDateDebut.isBefore(debut) || cdcDateDebut.isEqual(debut) ? cdcDateDebut : debut;
-            ZonedDateTime endDate   = cdcDateFin.isAfter(fin)      || cdcDateFin.isEqual(fin)     ? cdcDateFin   : fin;
-            int stepMin = cdcPas.getDurationInMinutes();
-            List<ZonedDateTime> newDates  = new ArrayList<>();
-            List<double[]>      newChunks = new ArrayList<>();
-            if (startDate.isBefore(cdcDateDebut)) {
-                ZonedDateTime cur = startDate;
-                int cnt = 0;
-                while (cur.isBefore(cdcDateDebut)) { newDates.add(cur); cnt++; cur = (cdcPas == StepEnum.Journalier) ? cur.plusDays(1) : cur.plusMinutes(stepMin); }
-                newChunks.add(allocate(cnt, fillVal));
-                newDates.addAll(cdcDates);
-                newChunks.add(puissances);
-            } else {
-                newDates.addAll(cdcDates);
-                newChunks.add(puissances);
-            }
-            if (endDate.isAfter(cdcDateFin)) {
-                ZonedDateTime cur = (cdcPas == StepEnum.Journalier) ? cdcDateFin.plusDays(1) : cdcDateFin.plusMinutes(stepMin);
-                List<ZonedDateTime> post = new ArrayList<>();
-                while (!cur.isAfter(endDate)) { post.add(cur); cur = (cdcPas == StepEnum.Journalier) ? cur.plusDays(1) : cur.plusMinutes(stepMin); }
-                newChunks.add(allocate(post.size(), fillVal));
-                newDates.addAll(post);
-            }
-            int total = newChunks.stream().mapToInt(a -> a.length).sum();
-            double[] merged = new double[total];
-            int pos = 0;
-            for (double[] chunk : newChunks) { System.arraycopy(chunk, 0, merged, pos, chunk.length); pos += chunk.length; }
-            cdcDates   = newDates;
-            puissances = merged;
-            setStartEndDates();
-        }
+    if (debut.isEqual(cdcDateDebut) && fin.isEqual(cdcDateFin)) {
+        return;
+    }
+
+    double fillVal = defaultValue == null ? MISSING : defaultValue;
+
+    ZonedDateTime startDate = cdcDateDebut.isBefore(debut) || cdcDateDebut.isEqual(debut)
+            ? cdcDateDebut
+            : debut;
+
+    ZonedDateTime endDate = cdcDateFin.isAfter(fin) || cdcDateFin.isEqual(fin)
+            ? cdcDateFin
+            : fin;
+
+    int prefixSize = 0;
+    int suffixSize = 0;
+    int stepMin = cdcPas.getDurationInMinutes();
+
+    ZonedDateTime cur = startDate;
+    while (cur.isBefore(cdcDateDebut)) {
+        prefixSize++;
+        cur = cdcPas == StepEnum.Journalier
+                ? cur.plusDays(1)
+                : cur.plusMinutes(stepMin);
+    }
+
+    cur = cdcPas == StepEnum.Journalier
+            ? cdcDateFin.plusDays(1)
+            : cdcDateFin.plusMinutes(stepMin);
+
+    while (!cur.isAfter(endDate)) {
+        suffixSize++;
+        cur = cdcPas == StepEnum.Journalier
+                ? cur.plusDays(1)
+                : cur.plusMinutes(stepMin);
+    }
+
+    int oldSize = puissances.length;
+    int newSize = prefixSize + oldSize + suffixSize;
+
+    double[] newPuissances = new double[newSize];
+
+    Arrays.fill(newPuissances, 0, prefixSize, fillVal);
+
+    System.arraycopy(
+            puissances,
+            0,
+            newPuissances,
+            prefixSize,
+            oldSize
+    );
+
+    Arrays.fill(
+            newPuissances,
+            prefixSize + oldSize,
+            newSize,
+            fillVal
+    );
+
+    List<ZonedDateTime> newDates = new ArrayList<>(newSize);
+
+    cur = startDate;
+    for (int i = 0; i < newSize; i++) {
+        newDates.add(cur);
+        cur = cdcPas == StepEnum.Journalier
+                ? cur.plusDays(1)
+                : cur.plusMinutes(stepMin);
+    }
+
+    cdcDates = newDates;
+    puissances = newPuissances;
+    setStartEndDates();
+}
