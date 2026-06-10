@@ -1,4 +1,4 @@
-AtomicReference<CdcOptimized> templateCdcRef = new AtomicReference<>();
+uAtomicReference<CdcOptimized> templateCdcRef = new AtomicReference<>();
 
 targetClasses.parallelStream().forEach(tempClassTarget -> {
     try {
@@ -43,3 +43,5 @@ targetClasses.parallelStream().forEach(tempClassTarget -> {
 
     checkMemoryConsumptionDebug("Debug 11");
 });
+
+import java.util.concurrent.atomic.AtomicReference;
