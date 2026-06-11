@@ -1,11 +1,27 @@
-CdcOptimized templateCdc = templateCdcRef.get();
+Analyse
 
-if (templateCdc == null) {
-    CdcOptimized newTemplateCdc = buildTemplateCdc(...);
+Les optimisations précédemment mises en œuvre (cache applicatif des courbes et remplacement des List<Double> par des double[]) ont permis de réduire significativement l’empreinte mémoire du job. Malgré ces gains, les analyses de consommation montraient encore une croissance importante de la mémoire allouée.
 
-    if (templateCdcRef.compareAndSet(null, newTemplateCdc)) {
-        templateCdc = newTemplateCdc;
-    } else {
-        templateCdc = templateCdcRef.get();
-    }
-}
+Une analyse détaillée réalisée en recette, avec instrumentation et points de contrôle mémoire sur le flux de traitement, a permis d’identifier une recréation répétitive d’instances CdcOptimized utilisées comme template de travail. Chaque instance représente environ 17 à 18 MB (principalement liée aux tableaux de données des courbes).
+
+Dans certains cas, ce template était reconstruit jusqu’à une trentaine de fois pour un même PRM, générant environ 560 MB d’allocations pour un seul PRM. À l’échelle d’un traitement massif (plusieurs centaines ou milliers de PRM), cette logique produisait un volume d’allocations extrêmement important et une forte pression sur le Garbage Collector.
+
+Cause racine
+
+Le templateCdc était recréé à chaque itération du traitement des classes temporelles alors que les données sous-jacentes étaient identiques et pouvaient être mutualisées.
+
+Correction
+
+Refactoring du traitement afin de construire le templateCdc une seule fois dans le scope du job, puis de le réutiliser sur l’ensemble des itérations du traitement du PRM.
+
+Cette modification supprime les allocations redondantes des structures volumineuses contenues dans CdcOptimized tout en conservant le même comportement fonctionnel.
+
+Résultat
+	•	Suppression des recréations multiples du templateCdc
+	•	Réduction significative du volume d’allocations mémoire
+	•	Diminution de la pression sur le Garbage Collector
+	•	Stabilisation de la consommation mémoire du job
+	•	Complément des optimisations déjà réalisées sur le cache applicatif et l’utilisation de double[]
+
+Avant : (captures / métriques avant)
+Après : (captures / métriques après)
