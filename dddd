@@ -25,3 +25,13 @@ Résultat
 
 Avant : (captures / métriques avant)
 Après : (captures / métriques après)
+
+Petit point d’avancement sur l’analyse mémoire du job.
+
+Après une session de debug en live en recette, j’ai identifié une recréation répétitive de CdcOptimized (~17-18 MB par instance) dans le traitement des classes temporelles. Malgré les optimisations déjà mises en place (cache applicatif des courbes + migration List<Double> → double[]), ce point générait encore un volume d’allocations important et une forte pression GC.
+
+J’ai revu l’implémentation et corrigé le problème en mutualisant le templateCdc dans le scope du job afin d’éviter les reconstructions inutiles.
+
+Vous trouverez ci-dessous les métriques avant/après qui montrent le gain obtenu sur les allocations mémoire.
+
+La prochaine étape serait d’organiser un atelier technique afin d’étudier l’application du même principe sur les anciennes implémentations CDC et de planifier les TNR associés.
