@@ -1,6 +1,8 @@
 	
 Petit point d’avancement sur l’analyse mémoire du job.
 
-J'ai revu l'implementation de la solution cache applicatif et l'utilisation de double[] à la place de List<Double> j'ai ajouté aussi une sorte de cache d'allocation de des courbes (prm / MeterReading) et voila les resultats avant et apres.
+J’ai revu l’implémentation des optimisations déjà mises en place (cache applicatif et utilisation de double[] à la place de List<Double>). J’ai également ajouté un mécanisme de mutualisation/cache des allocations des courbes au niveau (PRM / MeterReading).
 
-J'ai mis à jour le jira avec cette analyse.
+Vous trouverez ci-dessous les résultats avant/après, qui montrent les gains obtenus sur les allocations mémoire.
+
+J’ai également mis à jour le ticket Jira avec le détail de l’analyse et des corrections apportées
