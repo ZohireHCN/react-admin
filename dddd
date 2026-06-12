@@ -1,8 +1,340 @@
-	
-Petit point d’avancement sur l’analyse mémoire du job.
+Pour demain, je te conseille une présentation de 20 à 30 minutes maximum, très orientée problème → solution → bénéfices.
 
-J’ai revu l’implémentation des optimisations déjà mises en place (cache applicatif et utilisation de double[] à la place de List<Double>). J’ai également ajouté un mécanisme de mutualisation/cache des allocations des courbes au niveau (PRM / MeterReading).
+Slide 1 - Titre
 
-Vous trouverez ci-dessous les résultats avant/après, qui montrent les gains obtenus sur les allocations mémoire.
+Amélioration des performances, industrialisation des releases et sécurisation des MEP
 
-J’ai également mis à jour le ticket Jira avec le détail de l’analyse et des corrections apportées
+Sujets abordés
+	1.	Cache applicatif des données de référence
+	2.	Plugin Maven de préparation des livraisons
+	3.	Renforcement du processus de mise en production
+
+⸻
+
+Slide 2 - Pourquoi cette présentation ?
+
+Contexte
+
+Au cours de plusieurs investigations et travaux d’amélioration, plusieurs axes d’optimisation ont été identifiés :
+	•	Performance des batches.
+	•	Préparation des livraisons.
+	•	Sécurisation des mises en production.
+
+Objectif :
+
+Réduire les tâches manuelles, améliorer les performances et diminuer les risques opérationnels.
+
+⸻
+
+Partie 1 : Cache applicatif
+
+Slide 3 - Problématique observée
+
+Constat
+
+Pendant l’analyse de plusieurs jobs :
+	•	Plusieurs milliers d’appels vers la base de données.
+	•	Consultations répétitives des mêmes données de référence.
+	•	Temps d’exécution importants.
+	•	Charge inutile sur la base.
+
+Exemple :
+
+Traitement
+   ↓
+Référentiel A → Base
+Référentiel A → Base
+Référentiel A → Base
+Référentiel A → Base
+...
+
+Même donnée relue plusieurs milliers de fois.
+
+⸻
+
+Slide 4 - Solution proposée
+
+Cache applicatif centralisé
+
+Principe :
+
+1er accès
+      ↓
+Base de données
+      ↓
+Cache Singleton
+      ↓
+Traitements
+
+Les accès suivants :
+
+Traitement
+      ↓
+Cache mémoire
+
+Sans nouvel appel SQL.
+
+⸻
+
+Slide 5 - Architecture
+
+Tu peux afficher ton diagramme de cache ici.
+
+Expliquer :
+	•	Singleton.
+	•	Chargement unique.
+	•	Données partagées.
+	•	Réutilisation pendant toute l’exécution du batch.
+
+⸻
+
+Slide 6 - Bénéfices
+
+Résultats attendus
+	•	Réduction importante des accès BD.
+	•	Réduction de la charge serveur.
+	•	Amélioration des temps d’exécution.
+	•	Centralisation de l’accès aux référentiels.
+	•	Solution réutilisable pour d’autres référentiels.
+
+⸻
+
+Partie 2 : Plugin Maven
+
+Slide 7 - Constat
+
+Préparation des releases
+
+Aujourd’hui :
+	•	Scripts SQL regroupés manuellement.
+	•	Collections Postman regroupées manuellement.
+	•	Vérifications manuelles.
+	•	Risques d’erreur.
+	•	Temps de préparation important.
+
+⸻
+
+Slide 8 - Objectif
+
+Industrialiser la préparation des livraisons
+
+Principe :
+
+Comme OpenCell génère automatiquement ses collections de scripts Java, l’objectif est de générer automatiquement nos artefacts de livraison.
+
+Commande unique :
+
+mvn alpiq:buildprod \
+-DprodVersion=26.06.0 \
+-DwithGeneric=true
+
+
+⸻
+
+Slide 9 - Structure des sources
+
+Afficher ton arborescence :
+
+src
+├── generic
+│   ├── sql
+│   └── postman
+│
+└── release
+    └── 26.06.0
+         ├── hotfix
+         ├── 1-Both
+         ├── 2-B2C
+         └── 3-B2B
+
+Expliquer :
+	•	Generic = commun.
+	•	Both = commun B2B/B2C.
+	•	B2C spécifique.
+	•	B2B spécifique.
+	•	Hotfix copié tel quel.
+
+⸻
+
+Slide 10 - Ce que fait le plugin
+
+Génération automatique
+
+Pour chaque dossier :
+
+SQL
+
+Fusion :
+
+sql-data
+
+↓
+
+release-xx-data.sql
+
+SQL Structure
+
+Fusion :
+
+sql-struct
+
+↓
+
+release-xx-struct.sql
+
+Postman
+
+Fusion :
+
+*.json
+
+↓
+
+release-xx-postman.json
+
+
+⸻
+
+Slide 11 - Exemple SQL généré
+
+Montrer un exemple :
+
+-- FILE : create_table_customer.sql
+
+CREATE TABLE ...
+
+-- FILE : update_customer.sql
+
+UPDATE ...
+
+Avantage :
+	•	Traçabilité.
+	•	Debug facilité.
+	•	Relecture simplifiée.
+
+⸻
+
+Slide 12 - Exemple Postman généré
+
+Montrer ton exemple de collection fusionnée.
+
+Expliquer :
+	•	Chaque fichier apporte ses items.
+	•	Une seule collection finale.
+	•	Import simplifié dans Postman.
+
+⸻
+
+Slide 13 - Résultat final
+
+target/release
+
+├── generic
+├── 26.06.0
+│   ├── hotfix
+│   ├── 1-Both
+│   ├── 2-B2C
+│   └── 3-B2B
+
+Tout est prêt pour la livraison.
+
+⸻
+
+Slide 14 - Bénéfices
+
+Gains
+	•	Une seule commande.
+	•	Standardisation.
+	•	Réduction des erreurs.
+	•	Réduction du temps de préparation.
+	•	Artefacts reproductibles.
+	•	Meilleure traçabilité.
+
+⸻
+
+Partie 3 : Processus de MEP
+
+Slide 15 - Constat
+
+Aujourd’hui :
+	•	Pré-production utilisée principalement pour la recette.
+	•	Peu de validation technique complète avant production.
+	•	Risque de découvrir les problèmes au moment de la MEP.
+
+⸻
+
+Slide 16 - Proposition
+
+Renforcement du processus
+	•	Protection de la branche pré-production.
+	•	Gel de la branche avant la MEP.
+	•	Rejeu des scripts de MEP sur la pré-production.
+	•	TNR sur cette version candidate.
+	•	Tests de performance.
+	•	Validation finale avant production.
+
+⸻
+
+Slide 17 - Workflow cible
+
+Développement
+       ↓
+Recette
+       ↓
+Pré-production protégée
+       ↓
+Exécution scripts MEP
+       ↓
+TNR
+       ↓
+Tests de performance
+       ↓
+Validation
+       ↓
+Production
+
+
+⸻
+
+Slide 18 - Bénéfices
+
+Sécurisation des déploiements
+	•	Détection précoce des anomalies.
+	•	Réduction des risques en production.
+	•	Validation technique et fonctionnelle.
+	•	Validation des performances.
+	•	Processus plus fiable et plus prévisible.
+
+⸻
+
+Slide 19 - Conclusion
+
+Résumé
+
+Performance
+
+✅ Réduction des accès BD grâce au cache applicatif
+
+Industrialisation
+
+✅ Génération automatique des livrables via Maven
+
+Qualité
+
+✅ Renforcement du processus de MEP
+
+⸻
+
+Slide 20 - Questions / Discussions
+	•	Retours sur le cache ?
+	•	Généralisation à d’autres référentiels ?
+	•	Évolutions possibles du plugin ?
+	•	Améliorations du workflow de MEP ?
+
+⸻
+
+Pour une audience de développeurs, le point qui aura le plus d’impact est probablement de montrer avant/après :
+
+“Un batch faisait plusieurs milliers d’accès à la base pour relire les mêmes référentiels. Après mise en cache, ces accès sont remplacés par un chargement unique puis une lecture mémoire.”
+
+C’est généralement ce qui marque le plus lors d’une tech review.
