@@ -1,1 +1,57 @@
-Pour un même PRM, le job récupère plusieurs dizaines de fois un binaire d’environ 2 Mo avec exactement les mêmes paramètres, ce qui génère des allocations mémoire et des traitements inutiles
+Oui, si ton job peut être exécuté en parallèle ou si tu veux une implémentation robuste, utilise plutôt une ConcurrentHashMap avec computeIfAbsent().
+
+Pour ton support, tu peux écrire :
+
+Solution proposée
+
+Mise en place d'un cache interne au job basé sur une ConcurrentHashMap.
+
+Principe :
+Lorsqu'un traitement doit récupérer plusieurs fois une même donnée avec les mêmes paramètres, le résultat est stocké dans le cache.
+
+La clé est construite à partir d'un ou plusieurs paramètres métier.
+
+À chaque appel :
+- si la donnée est déjà présente dans le cache, elle est réutilisée ;
+- sinon, elle est chargée depuis la base de données puis automatiquement ajoutée au cache.
+
+Le cache est créé au démarrage du job et libéré à sa fin.
+
+Exemple d’implémentation
+
+private final Map<String, byte[]> cache = new ConcurrentHashMap<>();
+
+private byte[] getOrReload(
+        String prm,
+        String curveType,
+        LocalDate businessDate) {
+
+    String key = prm + "|" + curveType + "|" + businessDate;
+
+    return cache.computeIfAbsent(
+            key,
+            k -> repository.loadCurve(prm, curveType, businessDate)
+    );
+}
+
+Cas observé
+
+JOB : RFP_CURVE_PROFILING
+
+Pour un même PRM, le traitement recharge plusieurs dizaines de fois un binaire d'environ 2 Mo avec les mêmes paramètres.
+
+En utilisant une ConcurrentHashMap, le binaire n'est chargé qu'une seule fois puis réutilisé pendant toute l'exécution du job.
+
+Bénéfices
+
+- Réduction significative des appels BDD.
+- Réduction des allocations mémoire répétitives.
+- Amélioration des temps d'exécution.
+- Implémentation simple et peu intrusive.
+- Réutilisation automatique des données déjà chargées.
+
+Et pour la présentation demain, une phrase qui parle bien :
+
+“L’idée n’est pas de tout mettre en cache, mais d’identifier les appels coûteux effectués plusieurs fois avec les mêmes paramètres et de ne charger la donnée qu’une seule fois pendant l’exécution du job.”
+
+C’est généralement ce qui fait immédiatement comprendre la valeur de l’optimisation aux développeurs.
