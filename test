@@ -1,1 +1,1 @@
-JOB : RFP_CURVE_PROFILING : pour chaque prm il appelle et requipère un binaire de 2Mo des disaines de fois avec les mèmes paramètres.
+Pour un même PRM, le job récupère plusieurs dizaines de fois un binaire d’environ 2 Mo avec exactement les mêmes paramètres, ce qui génère des allocations mémoire et des traitements inutiles
