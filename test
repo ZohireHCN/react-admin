@@ -1,57 +1,77 @@
-Oui, si ton job peut être exécuté en parallèle ou si tu veux une implémentation robuste, utilise plutôt une ConcurrentHashMap avec computeIfAbsent().
+Oui, si la donnée dépend uniquement de :
+	•	prm
+	•	curveType
 
-Pour ton support, tu peux écrire :
+par exemple, tu n’as pas besoin de businessDate dans la clé.
 
-Solution proposée
+Tu peux faire :
 
-Mise en place d'un cache interne au job basé sur une ConcurrentHashMap.
+private final Map<String, Object> cache = new ConcurrentHashMap<>();
 
-Principe :
-Lorsqu'un traitement doit récupérer plusieurs fois une même donnée avec les mêmes paramètres, le résultat est stocké dans le cache.
+@SuppressWarnings("unchecked")
+private <T> T getOrReload(
+        String key,
+        Supplier<T> loader) {
 
-La clé est construite à partir d'un ou plusieurs paramètres métier.
-
-À chaque appel :
-- si la donnée est déjà présente dans le cache, elle est réutilisée ;
-- sinon, elle est chargée depuis la base de données puis automatiquement ajoutée au cache.
-
-Le cache est créé au démarrage du job et libéré à sa fin.
-
-Exemple d’implémentation
-
-private final Map<String, byte[]> cache = new ConcurrentHashMap<>();
-
-private byte[] getOrReload(
-        String prm,
-        String curveType,
-        LocalDate businessDate) {
-
-    String key = prm + "|" + curveType + "|" + businessDate;
-
-    return cache.computeIfAbsent(
+    return (T) cache.computeIfAbsent(
             key,
-            k -> repository.loadCurve(prm, curveType, businessDate)
+            k -> loader.get()
     );
 }
+
+Utilisation :
+
+byte[] curve = getOrReload(
+        prm + "|" + curveType,
+        () -> repository.loadCurve(prm, curveType)
+);
+
+Ou si un seul paramètre suffit :
+
+byte[] curve = getOrReload(
+        prm,
+        () -> repository.loadCurve(prm)
+);
+
+Pour ton support de présentation :
+
+Implémentation proposée
+
+private final Map<String, Object> cache = new ConcurrentHashMap<>();
+
+public <T> T getOrReload(String key, Supplier<T> loader) {
+    return (T) cache.computeIfAbsent(
+            key,
+            k -> loader.get()
+    );
+}
+
+Exemple d’utilisation
+
+CurveData curveData = getOrReload(
+        prm,
+        () -> curveRepository.loadCurve(prm)
+);
+
+Principe
+
+1er appel :
+    Cache MISS
+    -> Chargement BDD
+    -> Mise en cache
+
+Appels suivants :
+    Cache HIT
+    -> Réutilisation de l'objet déjà chargé
 
 Cas observé
 
 JOB : RFP_CURVE_PROFILING
 
-Pour un même PRM, le traitement recharge plusieurs dizaines de fois un binaire d'environ 2 Mo avec les mêmes paramètres.
+Pour un même PRM, le traitement recharge plusieurs dizaines de fois
+un binaire d'environ 2 Mo avec les mêmes paramètres.
 
-En utilisant une ConcurrentHashMap, le binaire n'est chargé qu'une seule fois puis réutilisé pendant toute l'exécution du job.
+Avec ce mécanisme, le binaire est chargé une seule fois puis
+réutilisé pendant toute l'exécution du job.
 
-Bénéfices
-
-- Réduction significative des appels BDD.
-- Réduction des allocations mémoire répétitives.
-- Amélioration des temps d'exécution.
-- Implémentation simple et peu intrusive.
-- Réutilisation automatique des données déjà chargées.
-
-Et pour la présentation demain, une phrase qui parle bien :
-
-“L’idée n’est pas de tout mettre en cache, mais d’identifier les appels coûteux effectués plusieurs fois avec les mêmes paramètres et de ne charger la donnée qu’une seule fois pendant l’exécution du job.”
-
-C’est généralement ce qui fait immédiatement comprendre la valeur de l’optimisation aux développeurs.
+C’est exactement le genre d’exemple concret qui parlera aux développeurs demain.
