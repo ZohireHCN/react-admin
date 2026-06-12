@@ -1,10 +1,1 @@
-private void logMemory(String step) {
-    Runtime rt = Runtime.getRuntime();
-
-    long usedMb = (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024;
-    long totalMb = rt.totalMemory() / 1024 / 1024;
-    long maxMb = rt.maxMemory() / 1024 / 1024;
-
-    log.info("[MEMORY] {} | used={} MB | total={} MB | max={} MB",
-            step, usedMb, totalMb, maxMb);
-}
+JOB : RFP_CURVE_PROFILING : pour chaque prm il appelle et requipère un binaire de 2Mo des disaines de fois avec les mèmes paramètres.
