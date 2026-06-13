@@ -1,15 +1,23 @@
-private final Map<String, Object> cache = new ConcurrentHashMap<>();
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+import java.util.Map;
 
-public <T> T getOrReload(String key, Supplier<T> loader) {
-    return (T) cache.computeIfAbsent(
-            key,
-            k -> loader.get()
+private void initDirectories(Map<String, Object> context) throws IOException {
+    List<String> directories = List.of(
+            context.get(INPUT_DIR_JOB_PARAM).toString(),
+            context.get(OUTPUT_DIR_JOB_PARAM).toString(),
+            context.get(REJECT_DIR_JOB_PARAM).toString(),
+            context.get(ARCHIVE_DIR_JOB_PARAM).toString()
     );
+
+    for (String directory : directories) {
+        Files.createDirectories(Path.of(directory));
+    }
 }
 
-
-
-CurveData curveData = getOrReload(
-        prm,
-        () -> curveRepository.loadCurve(prm)
-);
+private void createDirectoryIfNotExists(String dir) throws IOException {
+    Path path = Paths.get(dir);
+    Files.createDirectories(path); // crée toute l'arborescence si nécessaire
+}
