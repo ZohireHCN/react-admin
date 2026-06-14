@@ -1,45 +1,15 @@
-@Override
-public void execute(Map<String, Object> context) throws BusinessException {
+/**
+ * Initialise l'arborescence technique du job si elle n'existe pas encore.
+ */
+private void initializeDirectoriesIfNeeded(ReportDto report) throws IOException {
 
-    ReportDto report = new ReportDto();
+    Path inputDirectory = getInputDirectoryPath();
 
-    String invoicesParam = getStringParam(context, INVOICES_ID_JOB_PARAM);
-    String bordereauxParam = getStringParam(context, BORDEREAUX_ID_JOB_PARAM);
-    String motifCode = getStringParam(context, MOTIF_ID_JOB_PARAM);
+    if (Files.notExists(inputDirectory)) {
+        initDirectories();
 
-    try {
-
-        /*
-         * Mode initialisation :
-         * Si aucune facture et aucun bordereau ne sont fournis,
-         * le job vérifie l'existence du dossier input.
-         * Si input n'existe pas, toute l'arborescence est créée.
-         */
-        if (isEmpty(invoicesParam) && isEmpty(bordereauxParam)) {
-            initializeDirectoriesIfNeeded(report);
-            return;
-        }
-
-        /*
-         * Mode traitement :
-         * Si des factures ou des bordereaux sont fournis,
-         * le job lance le traitement d'avoirisation.
-         */
-        Long motifId = findMotifIdByCode(motifCode);
-
-        if (!isEmpty(invoicesParam)) {
-            processInvoices(parseIds(invoicesParam), motifId, report);
-        }
-
-        if (!isEmpty(bordereauxParam)) {
-            processBordereaux(parseIds(bordereauxParam), motifId, report);
-        }
-
-    } catch (Exception e) {
-        report.registerKo("Erreur globale du job : " + e.getMessage());
-        throw new BusinessException("Erreur traitement avoir interne", e);
-
-    } finally {
-        flushReportInContext(context, report);
+        report.registerOk("Initialisation des dossiers effectuée");
+    } else {
+        report.registerOk("Les dossiers existent déjà");
     }
 }
