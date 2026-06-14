@@ -1,71 +1,359 @@
-1 - Traitement des factures
-Etape 1 - Vérification de l'éligibilité de la facture à une avoirisation
-La facture ne fait pas partie d’un bordereau
+public class InvoiceCreditNoteScript extends Script {
 
-Il faut pour cela que l’ID de la facture (billing_invoice.id) soit pas présente dans le champ invoice_id de la table ct_bordereau_invoice.
+    private static final String INVOICES_ID_JOB_PARAM = "factures";
+    private static final String BORDEREAUX_ID_JOB_PARAM = "bordereaux";
+    private static final String MOTIF_ID_JOB_PARAM = "motif";
 
-Si la facture fait partie d’un bordereau alors le traitement s’arrête pour cette facture.
+    private static final String INVOICE_TYPE_CREDIT_NOTE = "MS-AV";
 
-La facture n’a pas déjà fait l’objet d’un avoir interne
+    @Override
+    public void execute(Map<String, Object> context) throws BusinessException {
 
-Il faut pour cela que l’ID de la facture (billing_invoice.id) soit pas présente dans le champ id_facture_initiale de la table ct_matching_invoice_credit_note.
+        ReportDto report = new ReportDto();
 
-Si la facture a déjà fait l’objet d’un avoir interne alors le traitement s’arrête pour cette facture.
+        String invoicesParam = getStringParam(context, INVOICES_ID_JOB_PARAM);
+        String bordereauxParam = getStringParam(context, BORDEREAUX_ID_JOB_PARAM);
+        String motifCode = getStringParam(context, MOTIF_ID_JOB_PARAM);
 
-Etape 2 - Création d’un avoir interne
-Création d’un avoir interne dans la table billing_invoice (facture de type MS-AV).
+        try {
+            Long motifId = findMotifIdByCode(motifCode);
 
-Le fonctionnement est le même que lors de l’annulation (création d’une facture d’extourne) : COL-16271: Annulation de facture/ Création d'un job d'annulation de facture
-Closed
- 
+            if (!isEmpty(invoicesParam)) {
+                processInvoices(parseIds(invoicesParam), motifId, report);
+            }
 
-Cependant l’objet facture créé est de type MS-AV au lieu de MS-AN.
+            if (!isEmpty(bordereauxParam)) {
+                processBordereaux(parseIds(bordereauxParam), motifId, report);
+            }
 
-Création des lignes de facturation (billing_rated_transaction) et des lignes d’agrégats (billing_invoice_agregate)
+        } catch (Exception e) {
+            report.registerKo("Erreur globale du job : " + e.getMessage());
+            throw new BusinessException("Erreur traitement avoir interne", e);
 
-Le fonctionnement est le même que lors de l’annulation (création d’une facture d’extourne) 
+        } finally {
+            flushReportInContext(context, report);
+        }
+    }
 
-Les lignes de la facture initiale sont dupliquées. Cependant les montants (HT, TVA, TTC) sont multipliés par -1 sur les lignes associées à l’avoir interne.
+    /**
+     * Traitement unitaire ou multiple des factures.
+     */
+    private void processInvoices(List<Long> invoiceIds, Long motifId, ReportDto report) {
 
-Etape 3 - Mise à jour de la facture initiale au statut avoirisée et stockage du motif de rejet/refus
-Le custom field cf_inv_cancelled au niveau de la facture initiale est passé à true.
+        for (Long invoiceId : invoiceIds) {
+            try {
+                processSingleInvoice(invoiceId, motifId, report, false);
+            } catch (Exception e) {
+                report.registerKo("Facture ID " + invoiceId + " : " + e.getMessage());
+            }
+        }
+    }
 
-Le custom field cf_inv_id_motif_rejet est quant à lui renseigné avec l’ID du motif rejet/refus. La correspondance entre le motif et l’ID peut être récupérée dans la table ct_motifs_rejets_refus 
+    /**
+     * Traitement d’une facture :
+     * 1. Vérification éligibilité
+     * 2. Création avoir interne MS-AV
+     * 3. Duplication lignes avec montants négatifs
+     * 4. Mise à jour facture initiale
+     * 5. Création matching facture / avoir
+     */
+    private void processSingleInvoice(
+            Long invoiceId,
+            Long motifId,
+            ReportDto report,
+            boolean fromBordereau) throws BusinessException {
 
-Etape 4 - Création d’une nouvelle ligne dans la table de matching des factures et avoirs interne
-On créé une ligne dans la table ct_matching_invoice_credit_note avec :
+        BillingInvoiceDto invoice = findInvoiceById(invoiceId);
 
-id = incrémentation automatique selon la séquence
+        if (invoice == null) {
+            throw new BusinessException("Facture introuvable");
+        }
 
-billing_account_id = ID du billing account concerné
+        if (!fromBordereau && isInvoiceAttachedToBordereau(invoiceId)) {
+            throw new BusinessException("Facture déjà rattachée à un bordereau");
+        }
 
-id_facture_initiale = ID de la facture avoirisée
+        if (hasAlreadyInternalCreditNote(invoiceId)) {
+            throw new BusinessException("Facture déjà avoirisée");
+        }
 
-id_avoir_interne = ID de l’avoir interne associé à la facture avoirisée
+        BillingInvoiceDto creditNote = createInternalCreditNote(invoice, motifId);
 
-id_motif_rejet = ID du motif de rejet ou refus de la facture (renseigné avec la même valeur que le custom field cf_inv_id_motif_rejet dans l'étape 3)
+        duplicateRatedTransactionsWithNegativeAmounts(invoice.getId(), creditNote.getId());
 
-2 - Traitement des bordereaux
-Etape 1 - Vérification de l'éligibilité du bordereau à une avoirisation
-Le bordereau n’a pas déjà fait l’objet d’un avoir interne
+        duplicateInvoiceAggregatesWithNegativeAmounts(invoice.getId(), creditNote.getId());
 
-Il faut pour cela que le champ cancelled du bordereau associé dans la table ct_bordereaux ne soit pas égal à true.
+        updateInitialInvoiceAsCancelled(invoice.getId(), motifId);
 
-Si le bordereau a déjà fait l’objet d’un avoir interne (ct_bordereaux.cancelled = true) alors le traitement s’arrête pour ce bordereau.
+        createInvoiceCreditNoteMatching(
+                invoice.getBillingAccountId(),
+                invoice.getId(),
+                creditNote.getId(),
+                motifId
+        );
 
-Etape 2 - Mise à jour du bordereau au statut avoirisé et stockage du motif de rejet/refus
-Le champ ct_bordereaux.cancelled au niveau du bordereau est passé à true.
+        if (fromBordereau) {
+            report.registerWarning(
+                    "Facture " + invoice.getInvoiceNumber()
+                            + " avoirisée via bordereau"
+            );
+        } else {
+            report.registerOk(
+                    "Facture " + invoice.getInvoiceNumber()
+                            + " avoirisée avec succès"
+            );
+        }
+    }
 
-Le champ ct_bordereaux.id_motif_rejet est quant à lui renseigné avec l’ID du motif rejet/refus. La correspondance entre le motif et l’ID peut être récupérée dans la table ct_motifs_rejets_refus (colonnes id et code).
+    /**
+     * Traitement des bordereaux :
+     * 1. Vérification éligibilité
+     * 2. Mise à jour bordereau cancelled = true
+     * 3. Traitement de toutes les factures du bordereau
+     */
+    private void processBordereaux(List<Long> bordereauIds, Long motifId, ReportDto report) {
 
-Etape 3 - Avoirisation de l’ensemble des factures contenues dans le bordereau
-Pour l’ensemble des factures contenues dans le bordereau (il est possible de retrouver les id via la table ct_bordereau_invoice) le traitement unitaire par facture décrit dans la partie 1 s’applique.
+        for (Long bordereauId : bordereauIds) {
+            try {
+                processSingleBordereau(bordereauId, motifId, report);
+            } catch (Exception e) {
+                report.registerKo("Bordereau ID " + bordereauId + " : " + e.getMessage());
+            }
+        }
+    }
 
-Rapport du job
-Nombre de OK : nombre de factures ou bordereaux avoirisés
+    private void processSingleBordereau(
+            Long bordereauId,
+            Long motifId,
+            ReportDto report) throws BusinessException {
 
-Nombre de warning : nombre de facture contenues dans des bordereaux avoirisées
+        BordereauDto bordereau = findBordereauById(bordereauId);
 
-Nombre de KO : nombre de factures ou bordereaux dont le traitement n’est pas allé à son terme
+        if (bordereau == null) {
+            throw new BusinessException("Bordereau introuvable");
+        }
 
-Le rapport du job liste les numéros de factures ou bordereaux concernés par un KO.
+        if (Boolean.TRUE.equals(bordereau.getCancelled())) {
+            throw new BusinessException("Bordereau déjà avoirisé");
+        }
+
+        updateBordereauAsCancelled(bordereauId, motifId);
+
+        List<Long> invoiceIds = findInvoiceIdsByBordereauId(bordereauId);
+
+        for (Long invoiceId : invoiceIds) {
+            processSingleInvoice(invoiceId, motifId, report, true);
+        }
+
+        report.registerOk(
+                "Bordereau " + bordereau.getCode()
+                        + " avoirisé avec succès"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // TODO - Requêtes / services à implémenter
+    // ---------------------------------------------------------------------
+
+    private Long findMotifIdByCode(String motifCode) throws BusinessException {
+        // TODO SELECT id FROM ct_motifs_rejets_refus WHERE code = ?
+        throw new UnsupportedOperationException("TODO findMotifIdByCode");
+    }
+
+    private BillingInvoiceDto findInvoiceById(Long invoiceId) {
+        // TODO récupération billing_invoice
+        throw new UnsupportedOperationException("TODO findInvoiceById");
+    }
+
+    private BordereauDto findBordereauById(Long bordereauId) {
+        // TODO SELECT * FROM ct_bordereaux WHERE id = ?
+        throw new UnsupportedOperationException("TODO findBordereauById");
+    }
+
+    private boolean isInvoiceAttachedToBordereau(Long invoiceId) {
+        // TODO SELECT COUNT(*) FROM ct_bordereau_invoice WHERE invoice_id = ?
+        throw new UnsupportedOperationException("TODO isInvoiceAttachedToBordereau");
+    }
+
+    private boolean hasAlreadyInternalCreditNote(Long invoiceId) {
+        // TODO SELECT COUNT(*) FROM ct_matching_invoice_credit_note WHERE id_facture_initiale = ?
+        throw new UnsupportedOperationException("TODO hasAlreadyInternalCreditNote");
+    }
+
+    private BillingInvoiceDto createInternalCreditNote(
+            BillingInvoiceDto initialInvoice,
+            Long motifId) {
+        // TODO INSERT billing_invoice type MS-AV
+        // Même logique que extourne MS-AN, mais type = MS-AV
+        throw new UnsupportedOperationException("TODO createInternalCreditNote");
+    }
+
+    private void duplicateRatedTransactionsWithNegativeAmounts(
+            Long initialInvoiceId,
+            Long creditNoteId) {
+        // TODO duplication billing_rated_transaction
+        // Montants HT / TVA / TTC multipliés par -1
+        throw new UnsupportedOperationException("TODO duplicateRatedTransactionsWithNegativeAmounts");
+    }
+
+    private void duplicateInvoiceAggregatesWithNegativeAmounts(
+            Long initialInvoiceId,
+            Long creditNoteId) {
+        // TODO duplication billing_invoice_agregate
+        // Montants HT / TVA / TTC multipliés par -1
+        throw new UnsupportedOperationException("TODO duplicateInvoiceAggregatesWithNegativeAmounts");
+    }
+
+    private void updateInitialInvoiceAsCancelled(
+            Long invoiceId,
+            Long motifId) {
+        // TODO update custom fields :
+        // cf_inv_cancelled = true
+        // cf_inv_id_motif_rejet = motifId
+        throw new UnsupportedOperationException("TODO updateInitialInvoiceAsCancelled");
+    }
+
+    private void createInvoiceCreditNoteMatching(
+            Long billingAccountId,
+            Long initialInvoiceId,
+            Long creditNoteId,
+            Long motifId) {
+        // TODO INSERT ct_matching_invoice_credit_note
+        throw new UnsupportedOperationException("TODO createInvoiceCreditNoteMatching");
+    }
+
+    private void updateBordereauAsCancelled(
+            Long bordereauId,
+            Long motifId) {
+        // TODO UPDATE ct_bordereaux
+        // SET cancelled = true, id_motif_rejet = ?
+        throw new UnsupportedOperationException("TODO updateBordereauAsCancelled");
+    }
+
+    private List<Long> findInvoiceIdsByBordereauId(Long bordereauId) {
+        // TODO SELECT invoice_id FROM ct_bordereau_invoice WHERE bordereau_id = ?
+        throw new UnsupportedOperationException("TODO findInvoiceIdsByBordereauId");
+    }
+
+    // ---------------------------------------------------------------------
+    // Utils
+    // ---------------------------------------------------------------------
+
+    private String getStringParam(Map<String, Object> context, String key) {
+        Object value = context.get(key);
+        return value != null ? value.toString().trim() : "";
+    }
+
+    private boolean isEmpty(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
+    private List<Long> parseIds(String value) {
+        return Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(v -> !v.isEmpty())
+                .map(Long::valueOf)
+                .collect(Collectors.toList());
+    }
+
+    private void flushReportInContext(
+            Map<String, Object> context,
+            ReportDto report) {
+
+        context.put(Script.JOB_RESULT_NB_OK, report.getNbOk());
+        context.put(Script.JOB_RESULT_NB_KO, report.getNbKo());
+        context.put("JOB_RESULT_NB_WARNING", report.getNbWarning());
+
+        if (!report.getMessage().isEmpty()) {
+            context.put(Script.JOB_RESULT_REPORT, report.getMessage());
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // DTO internes temporaires
+    // À remplacer par les entités/services réels
+    // ---------------------------------------------------------------------
+
+    private static class BillingInvoiceDto {
+        private Long id;
+        private String invoiceNumber;
+        private Long billingAccountId;
+
+        public Long getId() {
+            return id;
+        }
+
+        public String getInvoiceNumber() {
+            return invoiceNumber;
+        }
+
+        public Long getBillingAccountId() {
+            return billingAccountId;
+        }
+    }
+
+    private static class BordereauDto {
+        private Long id;
+        private String code;
+        private Boolean cancelled;
+
+        public Long getId() {
+            return id;
+        }
+
+        public String getCode() {
+            return code;
+        }
+
+        public Boolean getCancelled() {
+            return cancelled;
+        }
+    }
+
+    private static class ReportDto {
+
+        private int nbOk;
+        private int nbKo;
+        private int nbWarning;
+
+        private final StringBuilder reportBuilder = new StringBuilder();
+
+        public int getNbOk() {
+            return nbOk;
+        }
+
+        public int getNbKo() {
+            return nbKo;
+        }
+
+        public int getNbWarning() {
+            return nbWarning;
+        }
+
+        public String getMessage() {
+            return reportBuilder.toString();
+        }
+
+        public void registerOk(String message) {
+            nbOk++;
+            addMessage("[OK] " + message);
+        }
+
+        public void registerKo(String message) {
+            nbKo++;
+            addMessage("[KO] " + message);
+        }
+
+        public void registerWarning(String message) {
+            nbWarning++;
+            addMessage("[WARNING] " + message);
+        }
+
+        private void addMessage(String message) {
+            if (reportBuilder.length() > 0) {
+                reportBuilder.append(System.lineSeparator());
+            }
+            reportBuilder.append(message);
+        }
+    }
+}
