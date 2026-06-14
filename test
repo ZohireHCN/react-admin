@@ -1,15 +1,359 @@
-/**
- * Initialise l'arborescence technique du job si elle n'existe pas encore.
- */
-private void initializeDirectoriesIfNeeded(ReportDto report) throws IOException {
+public class InvoiceCreditNoteScript extends Script {
 
-    Path inputDirectory = getInputDirectoryPath();
+    private static final String INVOICES_ID_JOB_PARAM = "factures";
+    private static final String BORDEREAUX_ID_JOB_PARAM = "bordereaux";
+    private static final String MOTIF_ID_JOB_PARAM = "motif";
 
-    if (Files.notExists(inputDirectory)) {
-        initDirectories();
+    private static final String INVOICE_TYPE_CREDIT_NOTE = "MS-AV";
 
-        report.registerOk("Initialisation des dossiers effectuée");
-    } else {
-        report.registerOk("Les dossiers existent déjà");
+    @Override
+    public void execute(Map<String, Object> context) throws BusinessException {
+
+        ReportDto report = new ReportDto();
+
+        String invoicesParam = getStringParam(context, INVOICES_ID_JOB_PARAM);
+        String bordereauxParam = getStringParam(context, BORDEREAUX_ID_JOB_PARAM);
+        String motifCode = getStringParam(context, MOTIF_ID_JOB_PARAM);
+
+        try {
+            Long motifId = findMotifIdByCode(motifCode);
+
+            if (!isEmpty(invoicesParam)) {
+                processInvoices(parseIds(invoicesParam), motifId, report);
+            }
+
+            if (!isEmpty(bordereauxParam)) {
+                processBordereaux(parseIds(bordereauxParam), motifId, report);
+            }
+
+        } catch (Exception e) {
+            report.registerKo("Erreur globale du job : " + e.getMessage());
+            throw new BusinessException("Erreur traitement avoir interne", e);
+
+        } finally {
+            flushReportInContext(context, report);
+        }
+    }
+
+    /**
+     * Traitement unitaire ou multiple des factures.
+     */
+    private void processInvoices(List<Long> invoiceIds, Long motifId, ReportDto report) {
+
+        for (Long invoiceId : invoiceIds) {
+            try {
+                processSingleInvoice(invoiceId, motifId, report, false);
+            } catch (Exception e) {
+                report.registerKo("Facture ID " + invoiceId + " : " + e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * Traitement d’une facture :
+     * 1. Vérification éligibilité
+     * 2. Création avoir interne MS-AV
+     * 3. Duplication lignes avec montants négatifs
+     * 4. Mise à jour facture initiale
+     * 5. Création matching facture / avoir
+     */
+    private void processSingleInvoice(
+            Long invoiceId,
+            Long motifId,
+            ReportDto report,
+            boolean fromBordereau) throws BusinessException {
+
+        BillingInvoiceDto invoice = findInvoiceById(invoiceId);
+
+        if (invoice == null) {
+            throw new BusinessException("Facture introuvable");
+        }
+
+        if (!fromBordereau && isInvoiceAttachedToBordereau(invoiceId)) {
+            throw new BusinessException("Facture déjà rattachée à un bordereau");
+        }
+
+        if (hasAlreadyInternalCreditNote(invoiceId)) {
+            throw new BusinessException("Facture déjà avoirisée");
+        }
+
+        BillingInvoiceDto creditNote = createInternalCreditNote(invoice, motifId);
+
+        duplicateRatedTransactionsWithNegativeAmounts(invoice.getId(), creditNote.getId());
+
+        duplicateInvoiceAggregatesWithNegativeAmounts(invoice.getId(), creditNote.getId());
+
+        updateInitialInvoiceAsCancelled(invoice.getId(), motifId);
+
+        createInvoiceCreditNoteMatching(
+                invoice.getBillingAccountId(),
+                invoice.getId(),
+                creditNote.getId(),
+                motifId
+        );
+
+        if (fromBordereau) {
+            report.registerWarning(
+                    "Facture " + invoice.getInvoiceNumber()
+                            + " avoirisée via bordereau"
+            );
+        } else {
+            report.registerOk(
+                    "Facture " + invoice.getInvoiceNumber()
+                            + " avoirisée avec succès"
+            );
+        }
+    }
+
+    /**
+     * Traitement des bordereaux :
+     * 1. Vérification éligibilité
+     * 2. Mise à jour bordereau cancelled = true
+     * 3. Traitement de toutes les factures du bordereau
+     */
+    private void processBordereaux(List<Long> bordereauIds, Long motifId, ReportDto report) {
+
+        for (Long bordereauId : bordereauIds) {
+            try {
+                processSingleBordereau(bordereauId, motifId, report);
+            } catch (Exception e) {
+                report.registerKo("Bordereau ID " + bordereauId + " : " + e.getMessage());
+            }
+        }
+    }
+
+    private void processSingleBordereau(
+            Long bordereauId,
+            Long motifId,
+            ReportDto report) throws BusinessException {
+
+        BordereauDto bordereau = findBordereauById(bordereauId);
+
+        if (bordereau == null) {
+            throw new BusinessException("Bordereau introuvable");
+        }
+
+        if (Boolean.TRUE.equals(bordereau.getCancelled())) {
+            throw new BusinessException("Bordereau déjà avoirisé");
+        }
+
+        updateBordereauAsCancelled(bordereauId, motifId);
+
+        List<Long> invoiceIds = findInvoiceIdsByBordereauId(bordereauId);
+
+        for (Long invoiceId : invoiceIds) {
+            processSingleInvoice(invoiceId, motifId, report, true);
+        }
+
+        report.registerOk(
+                "Bordereau " + bordereau.getCode()
+                        + " avoirisé avec succès"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // TODO - Requêtes / services à implémenter
+    // ---------------------------------------------------------------------
+
+    private Long findMotifIdByCode(String motifCode) throws BusinessException {
+        // TODO SELECT id FROM ct_motifs_rejets_refus WHERE code = ?
+        throw new UnsupportedOperationException("TODO findMotifIdByCode");
+    }
+
+    private BillingInvoiceDto findInvoiceById(Long invoiceId) {
+        // TODO récupération billing_invoice
+        throw new UnsupportedOperationException("TODO findInvoiceById");
+    }
+
+    private BordereauDto findBordereauById(Long bordereauId) {
+        // TODO SELECT * FROM ct_bordereaux WHERE id = ?
+        throw new UnsupportedOperationException("TODO findBordereauById");
+    }
+
+    private boolean isInvoiceAttachedToBordereau(Long invoiceId) {
+        // TODO SELECT COUNT(*) FROM ct_bordereau_invoice WHERE invoice_id = ?
+        throw new UnsupportedOperationException("TODO isInvoiceAttachedToBordereau");
+    }
+
+    private boolean hasAlreadyInternalCreditNote(Long invoiceId) {
+        // TODO SELECT COUNT(*) FROM ct_matching_invoice_credit_note WHERE id_facture_initiale = ?
+        throw new UnsupportedOperationException("TODO hasAlreadyInternalCreditNote");
+    }
+
+    private BillingInvoiceDto createInternalCreditNote(
+            BillingInvoiceDto initialInvoice,
+            Long motifId) {
+        // TODO INSERT billing_invoice type MS-AV
+        // Même logique que extourne MS-AN, mais type = MS-AV
+        throw new UnsupportedOperationException("TODO createInternalCreditNote");
+    }
+
+    private void duplicateRatedTransactionsWithNegativeAmounts(
+            Long initialInvoiceId,
+            Long creditNoteId) {
+        // TODO duplication billing_rated_transaction
+        // Montants HT / TVA / TTC multipliés par -1
+        throw new UnsupportedOperationException("TODO duplicateRatedTransactionsWithNegativeAmounts");
+    }
+
+    private void duplicateInvoiceAggregatesWithNegativeAmounts(
+            Long initialInvoiceId,
+            Long creditNoteId) {
+        // TODO duplication billing_invoice_agregate
+        // Montants HT / TVA / TTC multipliés par -1
+        throw new UnsupportedOperationException("TODO duplicateInvoiceAggregatesWithNegativeAmounts");
+    }
+
+    private void updateInitialInvoiceAsCancelled(
+            Long invoiceId,
+            Long motifId) {
+        // TODO update custom fields :
+        // cf_inv_cancelled = true
+        // cf_inv_id_motif_rejet = motifId
+        throw new UnsupportedOperationException("TODO updateInitialInvoiceAsCancelled");
+    }
+
+    private void createInvoiceCreditNoteMatching(
+            Long billingAccountId,
+            Long initialInvoiceId,
+            Long creditNoteId,
+            Long motifId) {
+        // TODO INSERT ct_matching_invoice_credit_note
+        throw new UnsupportedOperationException("TODO createInvoiceCreditNoteMatching");
+    }
+
+    private void updateBordereauAsCancelled(
+            Long bordereauId,
+            Long motifId) {
+        // TODO UPDATE ct_bordereaux
+        // SET cancelled = true, id_motif_rejet = ?
+        throw new UnsupportedOperationException("TODO updateBordereauAsCancelled");
+    }
+
+    private List<Long> findInvoiceIdsByBordereauId(Long bordereauId) {
+        // TODO SELECT invoice_id FROM ct_bordereau_invoice WHERE bordereau_id = ?
+        throw new UnsupportedOperationException("TODO findInvoiceIdsByBordereauId");
+    }
+
+    // ---------------------------------------------------------------------
+    // Utils
+    // ---------------------------------------------------------------------
+
+    private String getStringParam(Map<String, Object> context, String key) {
+        Object value = context.get(key);
+        return value != null ? value.toString().trim() : "";
+    }
+
+    private boolean isEmpty(String value) {
+        return value == null || value.trim().isEmpty();
+    }
+
+    private List<Long> parseIds(String value) {
+        return Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(v -> !v.isEmpty())
+                .map(Long::valueOf)
+                .collect(Collectors.toList());
+    }
+
+    private void flushReportInContext(
+            Map<String, Object> context,
+            ReportDto report) {
+
+        context.put(Script.JOB_RESULT_NB_OK, report.getNbOk());
+        context.put(Script.JOB_RESULT_NB_KO, report.getNbKo());
+        context.put("JOB_RESULT_NB_WARNING", report.getNbWarning());
+
+        if (!report.getMessage().isEmpty()) {
+            context.put(Script.JOB_RESULT_REPORT, report.getMessage());
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // DTO internes temporaires
+    // À remplacer par les entités/services réels
+    // ---------------------------------------------------------------------
+
+    private static class BillingInvoiceDto {
+        private Long id;
+        private String invoiceNumber;
+        private Long billingAccountId;
+
+        public Long getId() {
+            return id;
+        }
+
+        public String getInvoiceNumber() {
+            return invoiceNumber;
+        }
+
+        public Long getBillingAccountId() {
+            return billingAccountId;
+        }
+    }
+
+    private static class BordereauDto {
+        private Long id;
+        private String code;
+        private Boolean cancelled;
+
+        public Long getId() {
+            return id;
+        }
+
+        public String getCode() {
+            return code;
+        }
+
+        public Boolean getCancelled() {
+            return cancelled;
+        }
+    }
+
+    private static class ReportDto {
+
+        private int nbOk;
+        private int nbKo;
+        private int nbWarning;
+
+        private final StringBuilder reportBuilder = new StringBuilder();
+
+        public int getNbOk() {
+            return nbOk;
+        }
+
+        public int getNbKo() {
+            return nbKo;
+        }
+
+        public int getNbWarning() {
+            return nbWarning;
+        }
+
+        public String getMessage() {
+            return reportBuilder.toString();
+        }
+
+        public void registerOk(String message) {
+            nbOk++;
+            addMessage("[OK] " + message);
+        }
+
+        public void registerKo(String message) {
+            nbKo++;
+            addMessage("[KO] " + message);
+        }
+
+        public void registerWarning(String message) {
+            nbWarning++;
+            addMessage("[WARNING] " + message);
+        }
+
+        private void addMessage(String message) {
+            if (reportBuilder.length() > 0) {
+                reportBuilder.append(System.lineSeparator());
+            }
+            reportBuilder.append(message);
+        }
     }
 }
