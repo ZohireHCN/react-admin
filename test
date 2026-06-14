@@ -1,23 +1,114 @@
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.List;
-import java.util.Map;
+public class InvoiceCreditNoteScript extends Script {
 
-private void initDirectories(Map<String, Object> context) throws IOException {
-    List<String> directories = List.of(
-            context.get(INPUT_DIR_JOB_PARAM).toString(),
-            context.get(OUTPUT_DIR_JOB_PARAM).toString(),
-            context.get(REJECT_DIR_JOB_PARAM).toString(),
-            context.get(ARCHIVE_DIR_JOB_PARAM).toString()
-    );
+    private ProviderService providerService = ((ProviderService) getServiceInterface(ProviderService.class.getSimpleName()));
+    private static final String INVOICES_ID_JOB_PARAM = "factures";
+    private static final String BORDEREAUX_ID_JOB_PARAM = "bordereaux";
+    private static final String MOTIF_ID_JOB_PARAM = "motif";
+    private static final String IMPORTS_DIR = "imports";
+    private static final String INVOICES_DIR = "invoices";
+    private static final String AVOIRS_DIR = "avoir_interne";
+    private static final String INPUT_SUBDIR = "input";
+    private static final String OUTPUT_SUBDIR = "output";
+    private static final String REJECT_SUBDIR = "reject";
+    private static final String ARCHIVE_SUBDIR = "archive";
+    private static final String ERROR_INIT_DIRECTORIES = "Error initializing directories";
+    private static final String INIT_DIRECTORIES = "Initializing directories";
 
-    for (String directory : directories) {
-        Files.createDirectories(Path.of(directory));
+
+
+    @Inject
+    private ParamBeanFactory paramBeanFactory;
+
+    @Override
+    public void execute(Map<String, Object> context) throws BusinessException {
+
+        ReportDto reportDto = new ReportDto();
+        String invoicesIdJobParam = context.get(INVOICES_ID_JOB_PARAM).toString();
+        String bordereauxIdJobParam = context.get(BORDEREAUX_ID_JOB_PARAM).toString();
+        String motifJobParam = context.get(MOTIF_ID_JOB_PARAM).toString();
+        MeveoUser currentUser = (MeveoUser) context.get(Script.CONTEXT_CURRENT_USER);
+
+
+        /**
+         *   int creation des dossiers
+         */
+        if(invoicesIdJobParam.isEmpty() && bordereauxIdJobParam.isEmpty()) {
+            try {
+                initDirectories(context);
+                reportDto.addReport(INIT_DIRECTORIES);
+            } catch (IOException e) {
+                reportDto.registerError(ERROR_INIT_DIRECTORIES);
+                throw new RuntimeException(e);
+            }
+        }
+
+
+        this.flushReportInContext(context, reportDto);
     }
-}
 
-private void createDirectoryIfNotExists(String dir) throws IOException {
-    Path path = Paths.get(dir);
-    Files.createDirectories(path); // crée toute l'arborescence si nécessaire
+    private void initDirectories(Map<String, Object> context) throws IOException {
+        String subdirJob = getProviderDir() + File.separator + IMPORTS_DIR + File.separator +  INVOICES_DIR + File.separator + AVOIRS_DIR;
+        List<String> directories = List.of(
+                subdirJob+File.separator+INPUT_SUBDIR,
+                subdirJob+File.separator+OUTPUT_SUBDIR,
+                subdirJob+File.separator+REJECT_SUBDIR,
+                subdirJob+File.separator+ARCHIVE_SUBDIR
+        );
+        for (String directory : directories) {
+            Files.createDirectories(Path.of(directory));
+        }
+    }
+
+    private String getProviderDir() {
+        String providerDir = ParamBean.getInstance().getChrootDir(providerService.getProvider().getCode());
+        File f = new File(providerDir);
+        if (!f.exists()) {
+            f.mkdirs();
+        }
+        return providerDir;
+    }
+
+
+    /* utils */
+    private void flushReportInContext(Map<String, Object> methodContext, ReportDto reportDto){
+        methodContext.put(Script.JOB_RESULT_NB_OK, reportDto.getNbOK());
+        methodContext.put(Script.JOB_RESULT_NB_KO, reportDto.getNbKO());
+        if (!reportDto.getReportMessage().isEmpty()) {
+            methodContext.put(Script.JOB_RESULT_REPORT, reportDto.getReportMessage());
+        }
+    }
+    private static class ReportDto {
+        private int nbOK;
+        private int nbKO;
+        private final StringBuilder reportBuilder = new StringBuilder();
+
+        public int getNbOK() {
+            return nbOK;
+        }
+
+        public int getNbKO() {
+            return nbKO;
+        }
+
+        public String getReportMessage() {
+            return reportBuilder.toString();
+        }
+
+        public void registerError(String message) {
+            this.addNbKO();
+            this.addReport(message);
+        }
+
+        public void addNbOK() {
+            this.nbOK++;
+        }
+
+        public void addNbKO() {
+            this.nbKO++;
+        }
+
+        public void addReport(String message) {
+            this.reportBuilder.append(message);
+        }
+    }
 }
