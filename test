@@ -1,152 +1,71 @@
-public class InvoiceCreditNoteScript extends Script {
+1 - Traitement des factures
+Etape 1 - Vérification de l'éligibilité de la facture à une avoirisation
+La facture ne fait pas partie d’un bordereau
 
-    private static final String INVOICES_ID_JOB_PARAM = "factures";
-    private static final String BORDEREAUX_ID_JOB_PARAM = "bordereaux";
-    private static final String MOTIF_ID_JOB_PARAM = "motif";
+Il faut pour cela que l’ID de la facture (billing_invoice.id) soit pas présente dans le champ invoice_id de la table ct_bordereau_invoice.
 
-    private static final String IMPORTS_DIR = "imports";
-    private static final String INVOICES_DIR = "invoices";
-    private static final String AVOIRS_DIR = "avoir_interne";
+Si la facture fait partie d’un bordereau alors le traitement s’arrête pour cette facture.
 
-    private static final String INPUT_SUBDIR = "input";
-    private static final String OUTPUT_SUBDIR = "output";
-    private static final String REJECT_SUBDIR = "reject";
-    private static final String ARCHIVE_SUBDIR = "archive";
+La facture n’a pas déjà fait l’objet d’un avoir interne
 
-    private static final String INIT_DIRECTORIES = "Initializing directories";
-    private static final String DIRECTORIES_ALREADY_EXIST = "Directories already exist";
-    private static final String ERROR_INIT_DIRECTORIES = "Error initializing directories";
+Il faut pour cela que l’ID de la facture (billing_invoice.id) soit pas présente dans le champ id_facture_initiale de la table ct_matching_invoice_credit_note.
 
-    private final ProviderService providerService =
-            (ProviderService) getServiceInterface(ProviderService.class.getSimpleName());
+Si la facture a déjà fait l’objet d’un avoir interne alors le traitement s’arrête pour cette facture.
 
-    @Inject
-    private ParamBeanFactory paramBeanFactory;
+Etape 2 - Création d’un avoir interne
+Création d’un avoir interne dans la table billing_invoice (facture de type MS-AV).
 
-    @Override
-    public void execute(Map<String, Object> context) throws BusinessException {
+Le fonctionnement est le même que lors de l’annulation (création d’une facture d’extourne) : COL-16271: Annulation de facture/ Création d'un job d'annulation de facture
+Closed
+ 
 
-        ReportDto reportDto = new ReportDto();
+Cependant l’objet facture créé est de type MS-AV au lieu de MS-AN.
 
-        String invoicesIdJobParam = getStringParam(context, INVOICES_ID_JOB_PARAM);
-        String bordereauxIdJobParam = getStringParam(context, BORDEREAUX_ID_JOB_PARAM);
+Création des lignes de facturation (billing_rated_transaction) et des lignes d’agrégats (billing_invoice_agregate)
 
-        if (isEmpty(invoicesIdJobParam) && isEmpty(bordereauxIdJobParam)) {
-            try {
-                Path inputDirectory = getInputDirectoryPath();
+Le fonctionnement est le même que lors de l’annulation (création d’une facture d’extourne) 
 
-                if (Files.notExists(inputDirectory)) {
-                    initDirectories();
-                    reportDto.addReport(INIT_DIRECTORIES);
-                    reportDto.addNbOK();
-                } else {
-                    reportDto.addReport(DIRECTORIES_ALREADY_EXIST);
-                    reportDto.addNbOK();
-                }
+Les lignes de la facture initiale sont dupliquées. Cependant les montants (HT, TVA, TTC) sont multipliés par -1 sur les lignes associées à l’avoir interne.
 
-            } catch (IOException e) {
-                reportDto.registerError(ERROR_INIT_DIRECTORIES);
-                throw new BusinessException(ERROR_INIT_DIRECTORIES, e);
-            }
-        }
+Etape 3 - Mise à jour de la facture initiale au statut avoirisée et stockage du motif de rejet/refus
+Le custom field cf_inv_cancelled au niveau de la facture initiale est passé à true.
 
-        flushReportInContext(context, reportDto);
-    }
+Le custom field cf_inv_id_motif_rejet est quant à lui renseigné avec l’ID du motif rejet/refus. La correspondance entre le motif et l’ID peut être récupérée dans la table ct_motifs_rejets_refus 
 
-    private void initDirectories() throws IOException {
-        Path baseDirectory = getBaseDirectoryPath();
+Etape 4 - Création d’une nouvelle ligne dans la table de matching des factures et avoirs interne
+On créé une ligne dans la table ct_matching_invoice_credit_note avec :
 
-        List<Path> directories = List.of(
-                baseDirectory.resolve(INPUT_SUBDIR),
-                baseDirectory.resolve(OUTPUT_SUBDIR),
-                baseDirectory.resolve(REJECT_SUBDIR),
-                baseDirectory.resolve(ARCHIVE_SUBDIR)
-        );
+id = incrémentation automatique selon la séquence
 
-        for (Path directory : directories) {
-            Files.createDirectories(directory);
-        }
-    }
+billing_account_id = ID du billing account concerné
 
-    private Path getInputDirectoryPath() {
-        return getBaseDirectoryPath().resolve(INPUT_SUBDIR);
-    }
+id_facture_initiale = ID de la facture avoirisée
 
-    private Path getBaseDirectoryPath() {
-        return Path.of(
-                getProviderDir(),
-                IMPORTS_DIR,
-                INVOICES_DIR,
-                AVOIRS_DIR
-        );
-    }
+id_avoir_interne = ID de l’avoir interne associé à la facture avoirisée
 
-    private String getProviderDir() {
-        String providerDir = ParamBean.getInstance()
-                .getChrootDir(providerService.getProvider().getCode());
+id_motif_rejet = ID du motif de rejet ou refus de la facture (renseigné avec la même valeur que le custom field cf_inv_id_motif_rejet dans l'étape 3)
 
-        File directory = new File(providerDir);
-        if (!directory.exists()) {
-            directory.mkdirs();
-        }
+2 - Traitement des bordereaux
+Etape 1 - Vérification de l'éligibilité du bordereau à une avoirisation
+Le bordereau n’a pas déjà fait l’objet d’un avoir interne
 
-        return providerDir;
-    }
+Il faut pour cela que le champ cancelled du bordereau associé dans la table ct_bordereaux ne soit pas égal à true.
 
-    private String getStringParam(Map<String, Object> context, String key) {
-        Object value = context.get(key);
-        return value != null ? value.toString().trim() : "";
-    }
+Si le bordereau a déjà fait l’objet d’un avoir interne (ct_bordereaux.cancelled = true) alors le traitement s’arrête pour ce bordereau.
 
-    private boolean isEmpty(String value) {
-        return value == null || value.trim().isEmpty();
-    }
+Etape 2 - Mise à jour du bordereau au statut avoirisé et stockage du motif de rejet/refus
+Le champ ct_bordereaux.cancelled au niveau du bordereau est passé à true.
 
-    private void flushReportInContext(Map<String, Object> context, ReportDto reportDto) {
-        context.put(Script.JOB_RESULT_NB_OK, reportDto.getNbOK());
-        context.put(Script.JOB_RESULT_NB_KO, reportDto.getNbKO());
+Le champ ct_bordereaux.id_motif_rejet est quant à lui renseigné avec l’ID du motif rejet/refus. La correspondance entre le motif et l’ID peut être récupérée dans la table ct_motifs_rejets_refus (colonnes id et code).
 
-        if (!reportDto.getReportMessage().isEmpty()) {
-            context.put(Script.JOB_RESULT_REPORT, reportDto.getReportMessage());
-        }
-    }
+Etape 3 - Avoirisation de l’ensemble des factures contenues dans le bordereau
+Pour l’ensemble des factures contenues dans le bordereau (il est possible de retrouver les id via la table ct_bordereau_invoice) le traitement unitaire par facture décrit dans la partie 1 s’applique.
 
-    private static class ReportDto {
+Rapport du job
+Nombre de OK : nombre de factures ou bordereaux avoirisés
 
-        private int nbOK;
-        private int nbKO;
-        private final StringBuilder reportBuilder = new StringBuilder();
+Nombre de warning : nombre de facture contenues dans des bordereaux avoirisées
 
-        public int getNbOK() {
-            return nbOK;
-        }
+Nombre de KO : nombre de factures ou bordereaux dont le traitement n’est pas allé à son terme
 
-        public int getNbKO() {
-            return nbKO;
-        }
-
-        public String getReportMessage() {
-            return reportBuilder.toString();
-        }
-
-        public void addNbOK() {
-            this.nbOK++;
-        }
-
-        public void addNbKO() {
-            this.nbKO++;
-        }
-
-        public void registerError(String message) {
-            addNbKO();
-            addReport(message);
-        }
-
-        public void addReport(String message) {
-            if (reportBuilder.length() > 0) {
-                reportBuilder.append(System.lineSeparator());
-            }
-            reportBuilder.append(message);
-        }
-    }
-}
+Le rapport du job liste les numéros de factures ou bordereaux concernés par un KO.
