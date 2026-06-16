@@ -1,108 +1,108 @@
+Ah d’accord, ton format est encore plus simple.
 
-Je ne te conseille pas de mettre tout le traitement de fichier directement dans execute(). Le plus propre est d’ajouter ces méthodes à ta classe puis de modifier légèrement ton execute().
+Tu veux un fichier comme :
 
-1. Modifier le execute()
+12345;12346;12347;12348
+987;988;989
 
-Remplace :
+où :
+	•	Ligne 1 = toutes les factures
+	•	Ligne 2 = tous les bordereaux
+	•	Le motif reste un paramètre du job
 
-if (isEmpty(invoicesParam) && isEmpty(bordereauxParam) && isEmpty(motifCode)) {
-    initializeDirectoriesIfNeeded(report);
-    return;
-}
+Du coup il n’y a plus besoin de parser ligne par ligne.
 
-par :
-
-if (isEmpty(invoicesParam) && isEmpty(bordereauxParam)) {
-
-    initializeDirectoriesIfNeeded(report);
-
-    if (hasInputFiles()) {
-        processInputFiles(report, currentUser);
-    }
-
-    return;
-}
-
-
-⸻
-
-2. Ajouter les méthodes de traitement des fichiers
-
-private boolean hasInputFiles() throws IOException {
-    try (Stream<Path> files = Files.list(getInputDirectoryPath())) {
-        return files.anyMatch(Files::isRegularFile);
-    }
-}
-
-private void processInputFiles(
-        ReportDto report,
-        MeveoUser currentUser) throws IOException {
-
-    try (Stream<Path> files = Files.list(getInputDirectoryPath())) {
-
-        files.filter(Files::isRegularFile)
-                .forEach(file -> {
-                    try {
-                        processSingleInputFile(file, report, currentUser);
-                    } catch (Exception e) {
-                        report.addReport(
-                                "Erreur traitement fichier "
-                                        + file.getFileName()
-                                        + " : "
-                                        + e.getMessage()
-                        );
-                        report.addNbKO();
-                    }
-                });
-    }
-}
-
-
-⸻
-
-3. Traitement d’un fichier
+Méthode de traitement du fichier
 
 private void processSingleInputFile(
         Path inputFile,
+        Long motifId,
         ReportDto report,
         MeveoUser currentUser) throws Exception {
-
-    List<String> outputLines = new ArrayList<>();
-    List<String> rejectLines = new ArrayList<>();
 
     List<String> lines = Files.readAllLines(
             inputFile,
             StandardCharsets.UTF_8
     );
 
-    if (lines.size() <= 1) {
-        moveFileToArchive(inputFile);
-        return;
+    if (lines.isEmpty()) {
+        throw new BusinessException("Fichier vide");
     }
 
-    outputLines.add("factures;BORDEREAU;RESULT");
-    rejectLines.add("factures;BORDEREAU;ERROR");
+    List<String> outputLines = new ArrayList<>();
+    List<String> rejectLines = new ArrayList<>();
 
-    for (int i = 1; i < lines.size(); i++) {
+    /*
+     * Ligne 1 : factures
+     */
+    if (lines.size() >= 1 && !isEmpty(lines.get(0))) {
 
-        String line = lines.get(i);
+        String[] invoices = lines.get(0).split(";");
 
-        if (isEmpty(line)) {
-            continue;
+        for (String invoice : invoices) {
+
+            try {
+
+                Long invoiceId = Long.valueOf(invoice.trim());
+
+                processSingleInvoice(
+                        invoiceId,
+                        motifId,
+                        report,
+                        false,
+                        currentUser
+                );
+
+                report.addNbOK();
+                outputLines.add("FACTURE;" + invoiceId);
+
+            } catch (Exception e) {
+
+                report.addNbKO();
+                rejectLines.add(
+                        "FACTURE;"
+                                + invoice
+                                + ";"
+                                + e.getMessage()
+                );
+            }
         }
+    }
 
-        try {
-            processInputLine(line, report, currentUser);
+    /*
+     * Ligne 2 : bordereaux
+     */
+    if (lines.size() >= 2 && !isEmpty(lines.get(1))) {
 
-            outputLines.add(line + ";OK");
+        String[] bordereaux = lines.get(1).split(";");
 
-        } catch (Exception e) {
+        for (String bordereau : bordereaux) {
 
-            rejectLines.add(
-                    line
-                            + ";"
-                            + e.getMessage()
-            );
+            try {
+
+                Long bordereauId = Long.valueOf(bordereau.trim());
+
+                processSingleBordereau(
+                        bordereauId,
+                        motifId,
+                        report,
+                        currentUser
+                );
+
+                report.addNbOK();
+                outputLines.add("BORDEREAU;" + bordereauId);
+
+            } catch (Exception e) {
+
+                report.addNbKO();
+
+                rejectLines.add(
+                        "BORDEREAU;"
+                                + bordereau
+                                + ";"
+                                + e.getMessage()
+                );
+            }
         }
     }
 
@@ -113,194 +113,29 @@ private void processSingleInputFile(
     moveFileToArchive(inputFile);
 }
 
+Exemple de fichier d’entrée
 
-⸻
+1001;1002;1003;1004
+2001;2002
 
-4. Traitement d’une ligne
+output
 
-Format attendu :
+FACTURE;1001
+FACTURE;1002
+FACTURE;1003
+FACTURE;1004
+BORDEREAU;2001
+BORDEREAU;2002
 
-factures;BORDEREAU;MOTIF
-12345;;REJET
-12346;;REFUS
-;987;REJET
+reject
 
-Code :
+FACTURE;1005;Facture déjà avoirisée
+BORDEREAU;2003;Bordereau déjà avoirisé
 
-private void processInputLine(
-        String line,
-        ReportDto report,
-        MeveoUser currentUser) throws BusinessException {
-
-    String[] values = line.split(";", -1);
-
-    if (values.length < 3) {
-        throw new BusinessException(
-                "Format invalide"
-        );
-    }
-
-    String invoiceValue = values[0].trim();
-    String bordereauValue = values[1].trim();
-    String motifValue = values[2].trim();
-
-    Long motifId = validateMotif(motifValue);
-
-    if (!isEmpty(invoiceValue)) {
-
-        processSingleInvoice(
-                Long.valueOf(invoiceValue),
-                motifId,
-                report,
-                false,
-                currentUser
-        );
-
-        report.addNbOK();
-        return;
-    }
-
-    if (!isEmpty(bordereauValue)) {
-
-        processSingleBordereau(
-                Long.valueOf(bordereauValue),
-                motifId,
-                report,
-                currentUser
-        );
-
-        report.addNbOK();
-        return;
-    }
-
-    throw new BusinessException(
-            "Aucune facture ou bordereau renseigné"
-    );
-}
-
-
-⸻
-
-5. Ecriture du fichier OUTPUT
-
-private void writeOutputFile(
-        Path inputFile,
-        List<String> lines) throws IOException {
-
-    String fileName =
-            removeExtension(inputFile.getFileName().toString())
-                    + "_output.csv";
-
-    Files.write(
-            getOutputDirectoryPath().resolve(fileName),
-            lines,
-            StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING
-    );
-}
-
-
-⸻
-
-6. Ecriture du fichier REJECT
-
-private void writeRejectFile(
-        Path inputFile,
-        List<String> lines) throws IOException {
-
-    if (lines.size() <= 1) {
-        return;
-    }
-
-    String fileName =
-            removeExtension(inputFile.getFileName().toString())
-                    + "_reject.csv";
-
-    Files.write(
-            getRejectDirectoryPath().resolve(fileName),
-            lines,
-            StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING
-    );
-}
-
-
-⸻
-
-7. Déplacement vers ARCHIVE
-
-private void moveFileToArchive(
-        Path inputFile) throws IOException {
-
-    Files.move(
-            inputFile,
-            getArchiveDirectoryPath()
-                    .resolve(inputFile.getFileName()),
-            StandardCopyOption.REPLACE_EXISTING
-    );
-}
-
-
-⸻
-
-8. Méthodes de répertoire
-
-private Path getOutputDirectoryPath() {
-    return getBaseDirectoryPath().resolve(OUTPUT_SUBDIR);
-}
-
-private Path getRejectDirectoryPath() {
-    return getBaseDirectoryPath().resolve(REJECT_SUBDIR);
-}
-
-private Path getArchiveDirectoryPath() {
-    return getBaseDirectoryPath().resolve(ARCHIVE_SUBDIR);
-}
-
-
-⸻
-
-9. Utilitaire
-
-private String removeExtension(String fileName) {
-
-    int pos = fileName.lastIndexOf('.');
-
-    if (pos > 0) {
-        return fileName.substring(0, pos);
-    }
-
-    return fileName;
-}
-
-Exemple complet de fichier d’entrée
-
-factures;BORDEREAU;MOTIF
-12345;;REJET
-12346;;REFUS
-;987;REJET
-;988;REFUS
-
-Résultat :
-
-input/
-   traitement.csv
-
-output/
-   traitement_output.csv
-
-reject/
-   traitement_reject.csv
-
-archive/
-   traitement.csv
-
-Et tu réutilises directement tes méthodes déjà développées :
-
-processSingleInvoice(...)
-processSingleBordereau(...)
-validateMotif(...)
-
-sans toucher à toute ta logique métier actuelle.
+Comme ça le métier est très clair :
+	•	1ère ligne = liste des IDs factures séparés par ;
+	•	2ème ligne = liste des IDs bordereaux séparés par ;
+	•	motif = paramètre du job
+	•	fichier traité → archive
+	•	succès → output
+	•	erreurs → reject.
