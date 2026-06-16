@@ -1,10 +1,1 @@
-private Boolean isEligibleRefacturation(Invoice invoice) {
-
-    CustomFieldValues invoiceCfValues = invoice.getCfValues();
-
-    Boolean cancelled = (Boolean) invoiceCfValues.getValue(INVOICE_CF_CANCELLED_KEY);
-    Boolean rebilled = (Boolean) invoiceCfValues.getValue(CF_INV_REBILLED);
-
-    return Boolean.TRUE.equals(cancelled)
-            && !Boolean.TRUE.equals(rebilled);
-}
+org.hibernate.HibernateException: identifier of an instance of org.meveo.model.billing.RatedTransaction was altered from 12911 to null
