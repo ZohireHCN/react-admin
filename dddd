@@ -1,637 +1,234 @@
-public class InvoiceCreditNoteScript extends Script {
+public class InvoiceSansRevalorisationScriptV1 extends Script {
 
     private final CustomTableService customTableService = (CustomTableService) getServiceInterface("CustomTableService");
     private final InvoiceService invoiceService = (InvoiceService) getServiceInterface(InvoiceService.class.getSimpleName());
-    private final InvoiceTypeService invoiceTypeService = (InvoiceTypeService) getServiceInterface(InvoiceTypeService.class.getSimpleName());
     private final RatedTransactionService ratedTransactionService = (RatedTransactionService) getServiceInterface(RatedTransactionService.class.getSimpleName());
     private final ProviderService providerService = (ProviderService) getServiceInterface(ProviderService.class.getSimpleName());
-    private final InvoiceAggregateHandler aggregateHandler = (InvoiceAggregateHandler) getServiceInterface(InvoiceAggregateHandler.class.getSimpleName());
-    private final TaxMappingService taxMappingService = (TaxMappingService) getServiceInterface(TaxMappingService.class.getSimpleName());
+    private final TaxMappingService taxMappingService = (TaxMappingService) getServiceInterface(TaxMappingService.class.getSimpleName()) ;
     private final UserAccountService userAccountService = (UserAccountService) getServiceInterface(UserAccountService.class.getSimpleName());
 
     private static final String QUERY_FIND_INVOICE_BY_ID = "SELECT i FROM Invoice i WHERE i.id = :id";
     private static final String QUERY_FIND_INVOICE_BY_BRD_ID = "SELECT invoice_id FROM ct_bordereau_invoice WHERE bordereau_id = :id";
-    private static final String QUERY_FIND_BRD_BY_BRD_ID = "SELECT id,cancelled FROM ct_bordereaux ctb WHERE ctb.id =:id";
+    private static final String QUERY_FIND_BRD_BY_BRD_ID = "SELECT id,cancelled,rebilled FROM ct_bordereaux ctb WHERE ctb.id =:id";
     private static final String QUERY_IS_IN_BR_BY_ID = "SELECT COUNT(*) FROM ct_bordereau_invoice cbi WHERE cbi.invoice_id = :id";
-    private static final String QUERY_IS_IN_AI_BY_ID = "SELECT COUNT(*) FROM ct_matching_invoice_credit_note cmicn WHERE cmicn.id_facture_initiale = :id ";
-    private static final String QUERY_INSERT_MATCHING = "INSERT INTO ct_matching_invoice_credit_note (id, billing_account_id, id_facture_initiale, id_avoir_interne, id_motif_rejet) VALUES (nextval('ct_matching_invoice_credit_note_seq'), :accountId, :invoiceId, :avoireId, :motifId)";
-    private static final String QUERY_CANCELLED_BR_BY_ID = "UPDATE ct_bordereaux SET cancelled=TRUE, id_motif_rejet=:motif WHERE id=:id";
-    private static final String QUERY_REJETS_REFUS_WHERE_UPPER_CODE_CODE = "SELECT id FROM ct_motifs_rejets_refus WHERE upper(code) = :code";
+    private static final String QUERY_CANCELLED_BR_BY_ID = "UPDATE ct_bordereaux SET  rebilled=TRUE WHERE id=:id";
 
     private static final String INVOICES_ID_JOB_PARAM = "factures";
     private static final String BORDEREAUX_ID_JOB_PARAM = "bordereaux";
-    private static final String MOTIF_ID_JOB_PARAM = "motif";
-
     private static final String IMPORTS_DIR = "imports";
     private static final String INVOICES_DIR = "invoices";
-    private static final String AVOIRS_DIR = "avoir_interne";
+    private static final String AVOIRS_DIR = "refac_sans_revalo";
     private static final String INPUT_SUBDIR = "input";
     private static final String OUTPUT_SUBDIR = "output";
     private static final String REJECT_SUBDIR = "reject";
     private static final String ARCHIVE_SUBDIR = "archive";
 
-    private static final String INVOICE_DEFAULT_TYPE = "MS-AV";
-
-    private static final String INVOICE_CF_SENDING_MAIL_VALUE_CF = "cf_inv_sending_mail_status";
-    private static final String CF_INV_NUM_BORDEREAU = "cf_inv_num_bordereau";
-    private static final String CF_INV_FIBU_FILES = "CF_INV_FIBU_FILES";
-    private static final String INVOICE_CF_VALUE_KEY = "cf_inv_einv_loaded";
     private static final String INVOICE_CF_CANCELLED_KEY = "cf_inv_cancelled";
-    private static final String INVOICE_CF_MOTIF_REJET_KEY = "cf_inv_id_motif_rejet";
-
+    public static final String CF_INV_REBILLED = "cf_inv_rebilled";
+    public static final String N_EST_PAS_ÉLIGIBILE_À_LA_REFACTURATION = " n'est pas éligibile à la refacturation";
+    public static final String ERREUR_TRAITEMENT_FICHIER = "Erreur traitement fichier ";
     private static final String MSG_INIT_DIRECTORIES = "Initialisation des dossiers effectuée";
     private static final String MSG_DIRECTORIES_ALREADY_EXIST = "Les dossiers existent déjà";
     private static final String MSG_FACTURE_NI_BORDEREAU_A_TRAITER = "Pas de facture ni bordereau à traiter";
-    private static final String MSG_MOTIF_EST_OBLIGATOIRE = "Le paramètre 'motif' est obligatoire";
-    private static final String MSG_REJET_OU_REFUS = "Le motif doit être REJET ou REFUS";
     private static final String MSG_FAIT_PARTIE_D_UN_BORDEREAU = " fait partie d’un bordereau";
-    private static final String MSG_FAIT_L_OBJET_D_UN_AVOIR_INTERNE = " déjà fait l’objet d’un avoir interne";
-
-    public static final String AUCUNE_FACTURE_OU_BORDEREAU_RENSEIGNE = "Aucune facture ou bordereau renseigné";
-    public static final String FORMAT_INVALIDE_FACTURE_BORDEREAU_MOTIF_ATTENDU = "Format invalide : FACTURE;BORDEREAU;MOTIF attendu";
-    public static final String ERREUR_TRAITEMENT_FICHIER = "Erreur traitement fichier ";
+    private static final String MSG_FAIT_PARTIE_D_UN_BORDEREAU1 = " fait partie d’un bordereau";
 
     @Override
     public void execute(Map<String, Object> context) throws BusinessException {
-
         ReportDto report = new ReportDto();
-
         String invoicesParam = getStringParam(context, INVOICES_ID_JOB_PARAM);
         String bordereauxParam = getStringParam(context, BORDEREAUX_ID_JOB_PARAM);
-        String motifCode = getStringParam(context, MOTIF_ID_JOB_PARAM);
-
         MeveoUser currentUser = (MeveoUser) context.get(Script.CONTEXT_CURRENT_USER);
-
         try {
             if (isEmpty(invoicesParam) && isEmpty(bordereauxParam)) {
-
-                if (isEmpty(motifCode)) {
+                if (Files.notExists(getInputDirectoryPath())) {
                     initializeDirectoriesIfNeeded(report);
                     return;
                 }
-
-                if (hasInputFiles()) {
-                    processInputFiles(report, currentUser);
-                } else {
-                    report.addReport(MSG_FACTURE_NI_BORDEREAU_A_TRAITER);
-                }
-
+                if (hasInputFiles()) processInputFiles(report, currentUser);
+                else report.addReport(MSG_FACTURE_NI_BORDEREAU_A_TRAITER);
                 return;
             }
-
-            Long motifId = validateMotif(motifCode);
-
-            if (!isEmpty(invoicesParam)) {
-                processInvoices(parseIds(invoicesParam), motifId, report, currentUser);
-            }
-
-            if (!isEmpty(bordereauxParam)) {
-                processBordereaux(parseIds(bordereauxParam), motifId, report, currentUser);
-            }
+            if (!isEmpty(invoicesParam)) processInvoices(parseIds(invoicesParam),report,currentUser);
+            if (!isEmpty(bordereauxParam)) processBordereaux(parseIds(bordereauxParam), report,currentUser);
 
         } catch (Exception e) {
             report.addReport(e.getMessage());
-
         } finally {
             flushReportInContext(context, report);
         }
     }
 
-    public void processInvoices(
-            List<Long> invoiceIds,
-            Long motifId,
-            ReportDto report,
-            MeveoUser currentUser) {
-
-        for (Long invoiceId : invoiceIds) {
-            try {
-                processSingleInvoice(invoiceId, motifId, false, currentUser);
-                report.addNbOK();
-
-            } catch (Exception e) {
-                report.addReport("Facture " + invoiceId + " KO : " + e.getMessage());
-                report.addNbKO();
-            }
-        }
-    }
-
-    public void processBordereaux(
-            List<Long> bordereauIds,
-            Long motifId,
-            ReportDto report,
-            MeveoUser currentUser) {
-
-        for (Long bordereauId : bordereauIds) {
-            try {
-                processSingleBordereau(bordereauId, motifId, currentUser);
-                report.addNbOK();
-
-            } catch (Exception e) {
-                report.addReport("Bordereau " + bordereauId + " KO : " + e.getMessage());
-                report.addNbKO();
-            }
-        }
-    }
-
-    @TransactionAttribute(TransactionAttributeType.REQUIRED)
-    public void processSingleInvoice(
-            Long invoiceId,
-            Long motifId,
-            boolean fromBordereau,
-            MeveoUser currentUser) throws BusinessException {
-
-        Invoice invoice = checkInvoiceEligibility(invoiceId, fromBordereau);
-
-        applyInvoiceCreditNote(invoice, motifId, currentUser);
-    }
-
-    @TransactionAttribute(TransactionAttributeType.REQUIRED)
-    public void processSingleBordereau(
-            Long bordereauId,
-            Long motifId,
-            MeveoUser currentUser) throws BusinessException {
-
-        checkBordereauEligibility(bordereauId);
-
-        List<Long> invoiceIds = findInvoiceIdsByBordereauId(bordereauId);
-
-        if (invoiceIds.isEmpty()) {
-            throw new BusinessException("Bordereau " + bordereauId + " sans facture");
-        }
-
-        List<Invoice> invoices = new ArrayList<>();
-
-        /*
-         * Phase 1 : contrôle complet du bordereau et de toutes ses factures.
-         * Aucune création ni update en base ne doit être faite ici.
-         */
-        for (Long invoiceId : invoiceIds) {
-            invoices.add(checkInvoiceEligibility(invoiceId, true));
-        }
-
-        /*
-         * Phase 2 : application des traitements uniquement si tous les checks sont OK.
-         */
-        for (Invoice invoice : invoices) {
-            applyInvoiceCreditNote(invoice, motifId, currentUser);
-        }
-
-        updateBordereauAsCancelled(bordereauId, motifId);
-    }
-
-    private Invoice checkInvoiceEligibility(
-            Long invoiceId,
-            boolean fromBordereau) throws BusinessException {
-
-        Invoice invoice = findInvoiceById(invoiceId);
-
-        if (invoice == null) {
-            throw new BusinessException("Facture ID " + invoiceId + " introuvable");
-        }
-
-        if (!fromBordereau && isInvoiceAttachedToBordereau(invoiceId)) {
-            throw new BusinessException("Facture ID " + invoiceId + MSG_FAIT_PARTIE_D_UN_BORDEREAU);
-        }
-
-        if (hasAlreadyInternalCreditNote(invoiceId)) {
-            throw new BusinessException("Facture ID " + invoiceId + MSG_FAIT_L_OBJET_D_UN_AVOIR_INTERNE);
-        }
-
-        return invoice;
-    }
-
-    private BordereauDto checkBordereauEligibility(Long bordereauId) throws BusinessException {
-
-        BordereauDto bordereau = findBordereauById(bordereauId);
-
-        if (bordereau == null) {
-            throw new BusinessException("Bordereau " + bordereauId + " introuvable");
-        }
-
-        if (Boolean.TRUE.equals(bordereau.getCancelled())) {
-            throw new BusinessException("Bordereau " + bordereauId + " déjà avoirisé");
-        }
-
-        return bordereau;
-    }
-
-    private void applyInvoiceCreditNote(
-            Invoice invoice,
-            Long motifId,
-            MeveoUser currentUser) throws BusinessException {
-
-        Invoice creditNote = unitCancelInvoice(currentUser, invoice);
-
-        updateInitialInvoiceAsCancelled(invoice, motifId);
-
-        createInvoiceCreditNoteMatching(
-                invoice.getBillingAccount().getId(),
-                invoice.getId(),
-                creditNote.getId(),
-                motifId
-        );
-    }
-
-    public Invoice unitCancelInvoice(MeveoUser currentUser, Invoice baseInvoice) {
-
-        Invoice cancelInvoice = new Invoice();
-
-        cancelInvoice.setDueDate(new Date());
-        cancelInvoice.setInvoiceDate(new Date());
-
-        InvoiceType cancelInvoiceType = this.invoiceTypeService.getDefaultType(INVOICE_DEFAULT_TYPE);
-        cancelInvoice.setInvoiceType(cancelInvoiceType);
-
-        cancelInvoice.setSeller(baseInvoice.getSeller());
-        cancelInvoice.setBillingAccount(baseInvoice.getBillingAccount());
-
-        cancelInvoice.setAmountWithoutTax(BigDecimal.ZERO);
-        cancelInvoice.setAmountWithTax(BigDecimal.ZERO);
-        cancelInvoice.setAmountTax(BigDecimal.ZERO);
-        cancelInvoice.setNetToPay(BigDecimal.ZERO);
-
-        InvoiceAggregateHandler invoiceAggregateHandler =
-                this.importRatedTransaction(baseInvoice, cancelInvoice);
-
-        this.saveInBD(cancelInvoice, baseInvoice, invoiceAggregateHandler, currentUser);
-
-        return cancelInvoice;
-    }
-
-    public void saveInBD(
-            Invoice cancelInvoice,
-            Invoice baseInvoice,
-            InvoiceAggregateHandler invoiceAggregateHandler,
-            MeveoUser currentUser) {
-
-        for (Map.Entry<String, TaxInvoiceAgregate> entry : invoiceAggregateHandler.getTaxInvAgregateMap().entrySet()) {
-            TaxInvoiceAgregate taxInvAgr = entry.getValue();
-            taxInvAgr.setInvoice(cancelInvoice);
-            taxInvAgr.updateAudit(currentUser);
-        }
-
-        for (Map.Entry<String, CategoryInvoiceAgregate> entry : invoiceAggregateHandler.getCatInvAgregateMap().entrySet()) {
-            CategoryInvoiceAgregate catInvAgr = entry.getValue();
-            catInvAgr.setInvoice(cancelInvoice);
-            catInvAgr.updateAudit(currentUser);
-            catInvAgr.setSubCategoryInvoiceAgregates(new HashSet<>());
-        }
-
-        List<RatedTransaction> rts = new ArrayList<>();
-
-        for (SubCategoryInvoiceAgregate subCatInvAggr : invoiceAggregateHandler.getSubCatInvAgregateMap().values()) {
-            subCatInvAggr.setInvoice(cancelInvoice);
-            subCatInvAggr.updateAudit(currentUser);
-
-            for (RatedTransaction rt : subCatInvAggr.getRatedtransactionsToAssociate()) {
-                rt.setInvoice(cancelInvoice);
-                rt.setInvoiceAgregateF(subCatInvAggr);
-                rt.changeStatus(RatedTransactionStatusEnum.BILLED);
-                rts.add(rt);
-            }
-        }
-
-        cancelInvoice.getLinkedInvoices().add(baseInvoice);
-
-        this.invoiceService.create(cancelInvoice);
-
-        for (RatedTransaction rt : rts) {
-            this.ratedTransactionService.create(rt);
-        }
-    }
-
-    public InvoiceAggregateHandler importRatedTransaction(
-            Invoice baseInvoice,
-            Invoice cancelInvoice) {
-
-        CustomFieldValues baseCfValues = baseInvoice.getCfValuesNullSafe();
-        Map<String, List<CustomFieldValue>> newValues =
-                new HashMap<>(baseCfValues.getValuesByCode());
-
-        newValues.remove(INVOICE_CF_SENDING_MAIL_VALUE_CF);
-        newValues.remove(CF_INV_NUM_BORDEREAU);
-        newValues.remove(CF_INV_FIBU_FILES);
-        newValues.remove(INVOICE_CF_VALUE_KEY);
-
-        CustomFieldValues newCfValues = new CustomFieldValues(newValues);
-
-        cancelInvoice.setCfValues(newCfValues);
-        cancelInvoice.setDetailedInvoice(baseInvoice.isDetailedInvoice());
-
-        UserAccount userAccount =
-                this.userAccountService.retrieveIfNotManaged(
-                        cancelInvoice.getBillingAccount().getUsersAccounts().get(0)
-                );
-
-        List<RatedTransaction> ratedTransactions =
-                ratedTransactionService.getRatedTransactionsByInvoice(baseInvoice, true);
-
-        aggregateHandler.reset();
-
-        for (RatedTransaction ratedTransaction : ratedTransactions) {
-
-            if (!DateUtils.isWithinDate(ratedTransaction.getUsageDate(), null, null)) {
-                continue;
-            }
-
-            TaxMappingService.TaxInfo taxInfo = null;
-
-            if (ratedTransaction.getTaxClass() != null) {
-                taxInfo = taxMappingService.determineTax(
-                        ratedTransaction.getTaxClass(),
-                        ratedTransaction.getSeller(),
-                        cancelInvoice.getBillingAccount(),
-                        userAccount,
-                        cancelInvoice.getInvoiceDate(),
-                        true,
-                        false
-                );
-            }
-
-            RatedTransaction newRT = new RatedTransaction(
-                    ratedTransaction.getUsageDate(),
-                    ratedTransaction.getUnitAmountWithoutTax(),
-                    ratedTransaction.getUnitAmountWithTax(),
-                    ratedTransaction.getUnitAmountTax(),
-                    ratedTransaction.getQuantity(),
-                    ratedTransaction.getAmountWithoutTax(),
-                    ratedTransaction.getAmountWithTax(),
-                    ratedTransaction.getAmountTax(),
-                    RatedTransactionStatusEnum.BILLED,
-                    userAccount.getWallet(),
-                    cancelInvoice.getBillingAccount(),
-                    userAccount,
-                    ratedTransaction.getInvoiceSubCategory(),
-                    ratedTransaction.getParameter1(),
-                    ratedTransaction.getParameter2(),
-                    ratedTransaction.getParameter3(),
-                    null,
-                    ratedTransaction.getOrderNumber(),
-                    null,
-                    ratedTransaction.getUnityDescription(),
-                    ratedTransaction.getRatingUnitDescription(),
-                    null,
-                    null,
-                    null,
-                    ratedTransaction.getCode(),
-                    ratedTransaction.getDescription(),
-                    ratedTransaction.getStartDate(),
-                    ratedTransaction.getEndDate(),
-                    ratedTransaction.getSeller(),
-                    taxInfo != null ? taxInfo.tax : ratedTransaction.getTax(),
-                    taxInfo != null ? taxInfo.tax.getPercent() : ratedTransaction.getTax().getPercent(),
-                    null,
-                    taxInfo != null ? taxInfo.taxClass : null,
-                    null
-            );
-
-            newRT.setInvoice(cancelInvoice);
-
-            aggregateHandler.addRT(cancelInvoice.getInvoiceDate(), newRT);
-        }
-
-        updateAmountsAndLines(aggregateHandler, cancelInvoice);
-
-        return aggregateHandler;
-    }
-
-    public void updateAmountsAndLines(
-            InvoiceAggregateHandler invoiceAggregateHandler,
-            Invoice cancelInvoice) throws BusinessException {
-
-        Provider appProvider = this.providerService.getProvider();
-
-        cancelInvoice.setAmountWithoutTax(
-                round(invoiceAggregateHandler.getInvoiceAmountWithoutTax(),
-                        appProvider.getInvoiceRounding(),
-                        appProvider.getInvoiceRoundingMode()).negate()
-        );
-
-        cancelInvoice.setAmountTax(
-                round(invoiceAggregateHandler.getInvoiceAmountTax(),
-                        appProvider.getInvoiceRounding(),
-                        appProvider.getInvoiceRoundingMode()).negate()
-        );
-
-        cancelInvoice.setAmountWithTax(
-                round(invoiceAggregateHandler.getInvoiceAmountWithTax(),
-                        appProvider.getInvoiceRounding(),
-                        appProvider.getInvoiceRoundingMode()).negate()
-        );
-
-        cancelInvoice.setNetToPay(cancelInvoice.getAmountWithTax().negate());
-    }
-
-    public boolean hasInputFiles() throws IOException {
+    private boolean hasInputFiles() throws IOException {
         try (Stream<Path> files = Files.list(getInputDirectoryPath())) {
             return files.anyMatch(Files::isRegularFile);
         }
     }
 
-    public void processInputFiles(
-            ReportDto report,
-            MeveoUser currentUser) throws IOException {
-
+    private void processInputFiles(ReportDto report, MeveoUser currentUser) throws IOException {
         try (Stream<Path> files = Files.list(getInputDirectoryPath())) {
             files.filter(Files::isRegularFile)
                     .forEach(file -> {
                         try {
                             processSingleInputFile(file, report, currentUser);
-
                         } catch (Exception e) {
                             report.addReport(ERREUR_TRAITEMENT_FICHIER + file.getFileName() + " : " + e.getMessage());
-                            report.addNbKO();
                         }
                     });
         }
     }
-
-    public void processSingleInputFile(
-            Path inputFile,
-            ReportDto report,
-            MeveoUser currentUser) throws Exception {
-
+    private void processSingleInputFile(Path inputFile, ReportDto report, MeveoUser currentUser) throws Exception {
+        List<String> lines = Files.readAllLines(inputFile,StandardCharsets.UTF_8);
+        if (lines.isEmpty()) return;
         List<String> outputLines = new ArrayList<>();
         List<String> rejectLines = new ArrayList<>();
-
-        List<String> lines = Files.readAllLines(inputFile, StandardCharsets.UTF_8);
-
-        outputLines.add("FACTURE;BORDEREAU;MOTIF;RESULT");
-        rejectLines.add("FACTURE;BORDEREAU;MOTIF;ERROR");
-
-        for (String line : lines) {
-
-            if (isEmpty(line)) {
-                continue;
-            }
-
-            try {
-                processInputLine(line, report, currentUser);
-                outputLines.add(line + ";OK");
-
-            } catch (Exception e) {
-                rejectLines.add(line + ";" + e.getMessage());
-                report.addNbKO();
+        if (!isEmpty(lines.get(0))) {
+            String[] invoices = lines.get(0).split(";");
+            for (String invoice : invoices) {
+                try {
+                    Long invoiceId = Long.valueOf(invoice.trim());
+                    processSingleInvoice(invoiceId,report,false,currentUser);
+                    report.addNbOK();
+                    outputLines.add("FACTURE;" + invoiceId);
+                } catch (Exception e) {
+                    report.addNbKO();
+                    rejectLines.add("FACTURE;"+ invoice+ ";"+ e.getMessage());
+                }
             }
         }
-
+        if (!isEmpty(lines.get(1))) {
+            String[] bordereaux = lines.get(1).split(";");
+            for (String bordereau : bordereaux) {
+                try {
+                    Long bordereauId = Long.valueOf(bordereau.trim());
+                    processSingleBordereau(bordereauId,report,currentUser);
+                    report.addNbOK();
+                    outputLines.add("BORDEREAU;" + bordereauId);
+                } catch (Exception e) {
+                    report.addNbKO();
+                    rejectLines.add("BORDEREAU;"+ bordereau+ ";"+ e.getMessage());
+                }
+            }
+        }
         writeOutputFile(inputFile, outputLines);
         writeRejectFile(inputFile, rejectLines);
         moveFileToArchive(inputFile);
     }
 
-    public void processInputLine(
-            String line,
-            ReportDto report,
-            MeveoUser currentUser) throws BusinessException {
-
-        String[] values = line.split(";", -1);
-
-        if (values.length < 3) {
-            throw new BusinessException(FORMAT_INVALIDE_FACTURE_BORDEREAU_MOTIF_ATTENDU);
+    private void processInvoices(List<Long> invoiceIds, ReportDto report, MeveoUser currentUser) {
+        for (Long invoiceId : invoiceIds) {
+            try {
+                processSingleInvoice(invoiceId, report, false,currentUser);
+            } catch (Exception e) {
+                report.addReport("\n" + e.getMessage());
+                report.addNbKO();
+            }
         }
+    }
 
-        String invoiceValue = values[0].trim();
-        String bordereauValue = values[1].trim();
-        String motifValue = values[2].trim();
+    @TransactionAttribute(TransactionAttributeType.REQUIRED)
+    private void processSingleInvoice(Long invoiceId,ReportDto report,boolean fromBordereau,MeveoUser currentUser) throws BusinessException {
+        Invoice invoice = findInvoiceById(invoiceId);
+        if (invoice == null)  throw new BusinessException("Facture ID " + invoiceId + MSG_FAIT_PARTIE_D_UN_BORDEREAU);
+        if (!fromBordereau && isInvoiceAttachedToBordereau(invoiceId)) throw new BusinessException("Facture ID " + invoiceId + MSG_FAIT_PARTIE_D_UN_BORDEREAU1);
+        if(!isEligibleRefacturation(invoice)) throw new BusinessException("Facture ID " + invoiceId + N_EST_PAS_ÉLIGIBILE_À_LA_REFACTURATION);
+        duplcateBillingRatedTransaction(invoice);
+        updateInvoiceRebillid(invoice);
+        if (fromBordereau) report.addNbWARN();
+        else report.addNbOK();
+    }
 
-        Long motifId = validateMotif(motifValue);
+    private void updateInvoiceRebillid(Invoice invoice) {
+        CustomFieldValues invoiceCfValues = invoice.getCfValues();
+        invoiceCfValues.setValue(CF_INV_REBILLED, true);
+        invoice.setCfValues(invoiceCfValues);
+        invoiceService.update(invoice);
+    }
 
-        if (!isEmpty(invoiceValue)) {
-            processSingleInvoice(Long.valueOf(invoiceValue), motifId, false, currentUser);
-            report.addNbOK();
-            return;
+    private void duplcateBillingRatedTransaction(Invoice invoice) {
+        List<RatedTransaction> ratedTransactions = ratedTransactionService.getRatedTransactionsByInvoice(invoice, true);
+        UserAccount userAccount = this.userAccountService.retrieveIfNotManaged(invoice.getBillingAccount().getUsersAccounts().get(0));
+        for (RatedTransaction ratedTransaction : ratedTransactions) {
+            TaxMappingService.TaxInfo taxInfo = null;
+            if (ratedTransaction.getTaxClass() != null) {
+                taxInfo = taxMappingService.determineTax(ratedTransaction.getTaxClass(),ratedTransaction.getSeller(),invoice.getBillingAccount(),userAccount, invoice.getInvoiceDate(), true, false);
+            }
+            RatedTransaction newRT = new RatedTransaction(ratedTransaction.getUsageDate(), ratedTransaction.getUnitAmountWithoutTax(), ratedTransaction.getUnitAmountWithTax(), ratedTransaction.getUnitAmountTax(), ratedTransaction.getQuantity(), ratedTransaction.getAmountWithoutTax(),
+                    ratedTransaction.getAmountWithTax(), ratedTransaction.getAmountTax(), RatedTransactionStatusEnum.OPEN, userAccount.getWallet(), invoice.getBillingAccount(), userAccount, ratedTransaction.getInvoiceSubCategory(), ratedTransaction.getParameter1(), ratedTransaction.getParameter2(),
+                    ratedTransaction.getParameter3(), null, ratedTransaction.getOrderNumber(), null, ratedTransaction.getUnityDescription(), ratedTransaction.getRatingUnitDescription(), null, null, null, ratedTransaction.getCode(), ratedTransaction.getDescription(), ratedTransaction.getStartDate(),
+                    ratedTransaction.getEndDate(), ratedTransaction.getSeller(), taxInfo != null ? taxInfo.tax : ratedTransaction.getTax(), taxInfo != null ? taxInfo.tax.getPercent() : ratedTransaction.getTax().getPercent(), null,
+                    taxInfo != null ? taxInfo.taxClass : null, null);
+            newRT.setInvoice(null);
+            newRT.setBillingRun(null);
+            newRT.setInvoiceAgregateF(null);
+            this.ratedTransactionService.create(newRT);
         }
+    }
 
-        if (!isEmpty(bordereauValue)) {
-            processSingleBordereau(Long.valueOf(bordereauValue), motifId, currentUser);
-            report.addNbOK();
-            return;
+    private Boolean isEligibleRefacturation(Invoice invoice) {
+        CustomFieldValues invoiceCfValues = invoice.getCfValues();
+        Boolean cancelled = (Boolean) invoiceCfValues.getValue(INVOICE_CF_CANCELLED_KEY);
+        Boolean rebilled = (Boolean) invoiceCfValues.getValue(CF_INV_REBILLED);
+        return Boolean.TRUE.equals(cancelled) && !Boolean.TRUE.equals(rebilled);
+    }
+
+    private void processBordereaux(List<Long> bordereauIds, ReportDto report, MeveoUser currentUser) {
+        for (Long bordereauId : bordereauIds) {
+            try {
+                processSingleBordereau(bordereauId, report,currentUser);
+                report.addNbOK();
+            } catch (Exception e) {
+                report.addReport("\r\n " + e.getMessage());
+                report.addNbKO();
+            }
         }
+    }
 
-        throw new BusinessException(AUCUNE_FACTURE_OU_BORDEREAU_RENSEIGNE);
+    @TransactionAttribute(TransactionAttributeType.REQUIRED)
+    private void processSingleBordereau(Long bordereauId, ReportDto report, MeveoUser currentUser) throws BusinessException {
+        BordereauDto bordereau = findBordereauById(bordereauId);
+        if (!idBRElegible(bordereau)) {
+            throw new BusinessException("Bordereau "+bordereauId+" non élégible");
+        }
+        List<Long> invoiceIds = findInvoiceIdsByBordereauId(bordereauId);
+        for (Long invoiceId : invoiceIds) {
+            processSingleInvoice(invoiceId, report, true,currentUser);
+        }
+        updateBordereauAsRebilled(bordereauId);
+    }
+
+    private void updateBordereauAsRebilled(Long bordereauId) {
+        customTableService.getEntityManager().createNativeQuery(QUERY_CANCELLED_BR_BY_ID).setParameter("id",bordereauId).executeUpdate();
+    }
+
+    private boolean idBRElegible(BordereauDto bordereau) {
+        Boolean cancelled = bordereau.getCancelled();
+        Boolean rebilled = bordereau.getRebilled() != null &&  bordereau.getRebilled();
+        return cancelled && !rebilled;
     }
 
     private Invoice findInvoiceById(Long invoiceId) {
-        return this.invoiceService
-                .getEntityManager()
-                .createQuery(QUERY_FIND_INVOICE_BY_ID, Invoice.class)
-                .setParameter("id", invoiceId)
-                .getSingleResult();
+        return this.invoiceService.getEntityManager().createQuery(QUERY_FIND_INVOICE_BY_ID, Invoice.class).setParameter("id", invoiceId).getSingleResult();
     }
 
     private boolean isInvoiceAttachedToBordereau(Long invoiceId) {
-        int count = Integer.parseInt(
-                customTableService.getEntityManager()
-                        .createNativeQuery(QUERY_IS_IN_BR_BY_ID)
-                        .setParameter("id", invoiceId)
-                        .getSingleResult()
-                        .toString()
-        );
-
-        return count > 0;
-    }
-
-    private boolean hasAlreadyInternalCreditNote(Long invoiceId) {
-        int count = Integer.parseInt(
-                customTableService.getEntityManager()
-                        .createNativeQuery(QUERY_IS_IN_AI_BY_ID)
-                        .setParameter("id", invoiceId)
-                        .getSingleResult()
-                        .toString()
-        );
-
-        return count > 0;
+        int nbrInATB= Integer.parseInt(customTableService.getEntityManager().createNativeQuery(QUERY_IS_IN_BR_BY_ID).setParameter("id",invoiceId).getSingleResult().toString());
+        return nbrInATB>0;
     }
 
     private BordereauDto findBordereauById(Long bordereauId) {
         try {
-            Object[] row = (Object[]) customTableService
-                    .getEntityManager()
-                    .createNativeQuery(QUERY_FIND_BRD_BY_BRD_ID)
-                    .setParameter("id", bordereauId)
-                    .getSingleResult();
-
-            return new BordereauDto(
-                    Long.valueOf(row[0].toString()),
-                    (Boolean) row[1]
-            );
-
+            Object[] obj= (Object[]) customTableService.getEntityManager().createNativeQuery(QUERY_FIND_BRD_BY_BRD_ID).setParameter("id",bordereauId).getSingleResult();
+            return new BordereauDto(Long.valueOf(obj[0].toString()) ,(Boolean)  obj[1],(Boolean)  obj[2]);
         } catch (Exception e) {
             throw new BusinessException("ERROR IN FindBordereauById");
         }
     }
 
-    private void updateInitialInvoiceAsCancelled(
-            Invoice invoice,
-            Long motifId) {
-
-        CustomFieldValues invoiceCfValues = invoice.getCfValues();
-
-        invoiceCfValues.setValue(INVOICE_CF_CANCELLED_KEY, true);
-        invoiceCfValues.setValue(INVOICE_CF_MOTIF_REJET_KEY, motifId);
-
-        invoiceService.update(invoice);
-    }
-
-    private void createInvoiceCreditNoteMatching(
-            Long billingAccountId,
-            Long initialInvoiceId,
-            Long creditNoteId,
-            Long motifId) {
-
-        customTableService.getEntityManager()
-                .createNativeQuery(QUERY_INSERT_MATCHING)
-                .setParameter("accountId", billingAccountId)
-                .setParameter("invoiceId", initialInvoiceId)
-                .setParameter("avoireId", creditNoteId)
-                .setParameter("motifId", motifId)
-                .executeUpdate();
-    }
-
-    private void updateBordereauAsCancelled(
-            Long bordereauId,
-            Long motifId) {
-
-        customTableService.getEntityManager()
-                .createNativeQuery(QUERY_CANCELLED_BR_BY_ID)
-                .setParameter("motif", motifId)
-                .setParameter("id", bordereauId)
-                .executeUpdate();
-    }
-
     private List<Long> findInvoiceIdsByBordereauId(Long bordereauId) {
-
-        List<?> ids = this.customTableService
-                .getEntityManager()
-                .createNativeQuery(QUERY_FIND_INVOICE_BY_BRD_ID)
-                .setParameter("id", bordereauId)
-                .getResultList();
-
-        return ids.stream()
-                .map(id -> ((Number) id).longValue())
-                .collect(Collectors.toList());
-    }
-
-    private Long validateMotif(String motif) throws BusinessException {
-        try {
-            if (isEmpty(motif)) {
-                throw new BusinessException(MSG_MOTIF_EST_OBLIGATOIRE);
-            }
-
-            String normalizedMotif = motif.trim().toUpperCase();
-
-            Object result = customTableService
-                    .getEntityManager()
-                    .createNativeQuery(QUERY_REJETS_REFUS_WHERE_UPPER_CODE_CODE)
-                    .setParameter("code", normalizedMotif)
-                    .getSingleResult();
-
-            return Long.valueOf(result.toString());
-
-        } catch (Exception e) {
-            throw new BusinessException(MSG_REJET_OU_REFUS);
-        }
+        List<?> idbrdStr = this.customTableService.getEntityManager().createNativeQuery(QUERY_FIND_INVOICE_BY_BRD_ID)
+                .setParameter("id", bordereauId).getResultList();
+        return idbrdStr.stream().map(inv ->((Number) inv).longValue()).collect(Collectors.toList());
     }
 
     private List<Long> parseIds(String value) {
@@ -643,9 +240,7 @@ public class InvoiceCreditNoteScript extends Script {
     }
 
     private void initializeDirectoriesIfNeeded(ReportDto report) throws IOException {
-
         Path inputDirectory = getInputDirectoryPath();
-
         if (Files.notExists(inputDirectory)) {
             initDirectories();
             report.addReport(MSG_INIT_DIRECTORIES);
@@ -655,16 +250,13 @@ public class InvoiceCreditNoteScript extends Script {
     }
 
     private void initDirectories() throws IOException {
-
         Path baseDirectory = getBaseDirectoryPath();
-
         List<Path> directories = List.of(
                 baseDirectory.resolve(INPUT_SUBDIR),
                 baseDirectory.resolve(OUTPUT_SUBDIR),
                 baseDirectory.resolve(REJECT_SUBDIR),
                 baseDirectory.resolve(ARCHIVE_SUBDIR)
         );
-
         for (Path directory : directories) {
             Files.createDirectories(directory);
         }
@@ -675,24 +267,13 @@ public class InvoiceCreditNoteScript extends Script {
     }
 
     private Path getBaseDirectoryPath() {
-        return Path.of(
-                getProviderDir(),
-                IMPORTS_DIR,
-                INVOICES_DIR,
-                AVOIRS_DIR
-        );
+        return Path.of(getProviderDir(),IMPORTS_DIR,INVOICES_DIR,AVOIRS_DIR);
     }
 
     private String getProviderDir() {
-        String providerDir = ParamBean.getInstance()
-                .getChrootDir(providerService.getProvider().getCode());
-
+        String providerDir = ParamBean.getInstance().getChrootDir(providerService.getProvider().getCode());
         File directory = new File(providerDir);
-
-        if (!directory.exists()) {
-            directory.mkdirs();
-        }
-
+        if (!directory.exists()) directory.mkdirs();
         return providerDir;
     }
 
@@ -705,60 +286,25 @@ public class InvoiceCreditNoteScript extends Script {
         return value == null || value.trim().isEmpty();
     }
 
-    private void flushReportInContext(
-            Map<String, Object> context,
-            ReportDto reportDto) {
-
+    private void flushReportInContext(Map<String, Object> context, ReportDto reportDto) {
         context.put(Script.JOB_RESULT_NB_OK, reportDto.getNbOK());
         context.put(Script.JOB_RESULT_NB_KO, reportDto.getNbKO());
         context.put(Script.JOB_RESULT_NB_WARN, reportDto.getNbWARN());
-
-        if (!reportDto.getReportMessage().isEmpty()) {
-            context.put(Script.JOB_RESULT_REPORT, reportDto.getReportMessage());
-        }
+        if (!reportDto.getReportMessage().isEmpty()) context.put(Script.JOB_RESULT_REPORT, reportDto.getReportMessage());
     }
 
-    private void writeOutputFile(
-            Path inputFile,
-            List<String> lines) throws IOException {
-
-        String fileName = removeExtension(inputFile.getFileName().toString()) + "_output.csv";
-
-        Files.write(
-                getOutputDirectoryPath().resolve(fileName),
-                lines,
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
+    private void writeOutputFile(Path inputFile, List<String> lines) throws IOException {
+         String fileName =removeExtension(inputFile.getFileName().toString()) + "_output.csv";
+         Files.write(getOutputDirectoryPath().resolve(fileName),lines,StandardCharsets.UTF_8,StandardOpenOption.CREATE,StandardOpenOption.TRUNCATE_EXISTING);
+    }
+    private void writeRejectFile( Path inputFile, List<String> lines) throws IOException {
+         if (lines.size() <= 1) return;
+         String fileName = removeExtension(inputFile.getFileName().toString()) + "_reject.csv";
+         Files.write(getRejectDirectoryPath().resolve(fileName),lines,StandardCharsets.UTF_8,StandardOpenOption.CREATE,StandardOpenOption.TRUNCATE_EXISTING);
     }
 
-    private void writeRejectFile(
-            Path inputFile,
-            List<String> lines) throws IOException {
-
-        if (lines.size() <= 1) {
-            return;
-        }
-
-        String fileName = removeExtension(inputFile.getFileName().toString()) + "_reject.csv";
-
-        Files.write(
-                getRejectDirectoryPath().resolve(fileName),
-                lines,
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING
-        );
-    }
-
-    private void moveFileToArchive(Path inputFile) throws IOException {
-
-        Files.move(
-                inputFile,
-                getArchiveDirectoryPath().resolve(inputFile.getFileName()),
-                StandardCopyOption.REPLACE_EXISTING
-        );
+    private void moveFileToArchive( Path inputFile ) throws IOException {
+         Files.move( inputFile, getArchiveDirectoryPath().resolve(inputFile.getFileName()), StandardCopyOption.REPLACE_EXISTING);
     }
 
     private Path getOutputDirectoryPath() {
@@ -775,68 +321,34 @@ public class InvoiceCreditNoteScript extends Script {
 
     private String removeExtension(String fileName) {
         int pos = fileName.lastIndexOf('.');
-        return pos > 0 ? fileName.substring(0, pos) : fileName;
+        if (pos > 0)  return fileName.substring(0, pos);
+        return fileName;
     }
 
     private static class BordereauDto {
-
         private Long id;
         private Boolean cancelled;
-
-        BordereauDto(Long id, Boolean cancelled) {
-            this.id = id;
-            this.cancelled = cancelled;
-        }
-
-        public Long getId() {
-            return id;
-        }
-
-        public Boolean getCancelled() {
-            return cancelled;
-        }
+        private Boolean rebilled;
+        BordereauDto(Long id, Boolean cancelled, Boolean rebilled) { this.id = id;  this.cancelled = cancelled; this.rebilled = rebilled;}
+        public Long getId() { return id; }
+        public Boolean getCancelled() { return cancelled; }
+        public Boolean getRebilled() { return rebilled; }
     }
 
     private static class ReportDto {
-
         private int nbOK;
         private int nbKO;
         private int nbWARN;
-
         private final StringBuilder reportBuilder = new StringBuilder();
-
-        public int getNbOK() {
-            return nbOK;
-        }
-
-        public int getNbKO() {
-            return nbKO;
-        }
-
-        public int getNbWARN() {
-            return nbWARN;
-        }
-
-        public String getReportMessage() {
-            return reportBuilder.toString();
-        }
-
-        public void addNbOK() {
-            this.nbOK++;
-        }
-
-        public void addNbKO() {
-            this.nbKO++;
-        }
-
-        public void addNbWARN() {
-            this.nbWARN++;
-        }
-
+        public int getNbWARN() { return nbWARN; }
+        public int getNbOK() { return nbOK; }
+        public int getNbKO() { return nbKO; }
+        public String getReportMessage() { return reportBuilder.toString(); }
+        public void addNbOK() { this.nbOK++; }
+        public void addNbKO() { this.nbKO++; }
+        public void addNbWARN() { this.nbWARN++; }
         public void addReport(String message) {
-            if (reportBuilder.length() > 0) {
-                reportBuilder.append(System.lineSeparator());
-            }
+            if (reportBuilder.length() > 0) reportBuilder.append(System.lineSeparator());
             reportBuilder.append(message);
         }
     }
