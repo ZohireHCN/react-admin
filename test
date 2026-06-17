@@ -1,3 +1,5 @@
-Achraf merci pour la mise à jour. Est-ce que les tests sont terminés ?
-
-Si les résultats sont conformes, on peut passer au refacto de la classe CDC pour tester le 2ᵉ job également et comparer/analyser leurs performances.
+SELECT bi.*
+FROM billing_invoice bi
+LEFT JOIN bd_invoice bdi
+    ON bdi.invoice_id = bi.invoice_id
+WHERE bdi.invoice_id IS NULL;
