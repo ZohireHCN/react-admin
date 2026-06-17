@@ -1,1 +1,73 @@
-org.hibernate.HibernateException: identifier of an instance of org.meveo.model.billing.RatedTransaction was altered from 12911 to null
+Oui. Dans ce cas, ton execute() peut être simplifié comme ça :
+
+@Override
+public void execute(Map<String, Object> context) throws BusinessException {
+
+    ReportDto report = new ReportDto();
+
+    String invoicesParam = getStringParam(context, INVOICES_ID_JOB_PARAM);
+    String bordereauxParam = getStringParam(context, BORDEREAUX_ID_JOB_PARAM);
+
+    MeveoUser currentUser =
+            (MeveoUser) context.get(Script.CONTEXT_CURRENT_USER);
+
+    try {
+
+        if (isEmpty(invoicesParam) && isEmpty(bordereauxParam)) {
+
+            /*
+             * Si le dossier input n'existe pas :
+             * on initialise uniquement les dossiers.
+             */
+            if (Files.notExists(getInputDirectoryPath())) {
+                initializeDirectoriesIfNeeded(report);
+                return;
+            }
+
+            /*
+             * Si le dossier input existe :
+             * on cherche les fichiers à traiter.
+             */
+            if (hasInputFiles()) {
+                processInputFiles(report, currentUser);
+            } else {
+                report.addReport(MSG_FACTURE_NI_BORDEREAU_A_TRAITER);
+            }
+
+            return;
+        }
+
+        /*
+         * Traitement classique via paramètres du job.
+         */
+        if (!isEmpty(invoicesParam)) {
+            processInvoices(parseIds(invoicesParam), report, currentUser);
+        }
+
+        if (!isEmpty(bordereauxParam)) {
+            processBordereaux(parseIds(bordereauxParam), report, currentUser);
+        }
+
+    } catch (Exception e) {
+        report.addReport("Erreur : " + e.getMessage());
+    } finally {
+        flushReportInContext(context, report);
+    }
+}
+
+Et donc tu supprimes partout :
+
+String motifCode = getStringParam(context, MOTIF_ID_JOB_PARAM);
+Long motifId = validateMotif(motifCode);
+
+Si tes méthodes attendent encore motifId, il faut aussi modifier les signatures, par exemple :
+
+processInputFiles(report, currentUser);
+processInvoices(parseIds(invoicesParam), report, currentUser);
+processBordereaux(parseIds(bordereauxParam), report, currentUser);
+
+Au lieu de :
+
+processInputFiles(motifId, report, currentUser);
+processInvoices(parseIds(invoicesParam), motifId, report, currentUser);
+processBordereaux(parseIds(bordereauxParam), motifId, report, currentUser);
