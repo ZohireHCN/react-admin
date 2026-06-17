@@ -1,5 +1,109 @@
-SELECT bi.*
-FROM billing_invoice bi
-LEFT JOIN bd_invoice bdi
-    ON bdi.invoice_id = bi.invoice_id
-WHERE bdi.invoice_id IS NULL;
+Format final du fichier sans entête :
+
+12345;;REJET
+;987;REFUS
+12346;;REJET
+
+Colonnes :
+
+factures;bordereaux;motif
+
+Méthode processSingleInputFile
+
+private void processSingleInputFile(
+        Path inputFile,
+        ReportDto report,
+        MeveoUser currentUser) throws Exception {
+
+    List<String> outputLines = new ArrayList<>();
+    List<String> rejectLines = new ArrayList<>();
+
+    List<String> lines = Files.readAllLines(inputFile, StandardCharsets.UTF_8);
+
+    if (lines.isEmpty()) {
+        throw new BusinessException("Fichier vide");
+    }
+
+    for (String line : lines) {
+
+        if (isEmpty(line)) {
+            continue;
+        }
+
+        try {
+            processInputLine(line, report, currentUser);
+            outputLines.add(line + ";OK");
+
+        } catch (Exception e) {
+            rejectLines.add(line + ";KO;" + e.getMessage());
+            report.addNbKO();
+        }
+    }
+
+    writeOutputFile(inputFile, outputLines);
+    writeRejectFile(inputFile, rejectLines);
+    moveFileToArchive(inputFile);
+}
+
+Méthode processInputLine
+
+private void processInputLine(
+        String line,
+        ReportDto report,
+        MeveoUser currentUser) throws BusinessException {
+
+    String[] values = line.split(";", -1);
+
+    if (values.length < 3) {
+        throw new BusinessException("Format invalide : facture;bordereau;motif attendu");
+    }
+
+    String invoiceValue = values[0].trim();
+    String bordereauValue = values[1].trim();
+    String motifValue = values[2].trim();
+
+    Long motifId = validateMotif(motifValue);
+
+    if (!isEmpty(invoiceValue)) {
+        processSingleInvoice(
+                Long.valueOf(invoiceValue),
+                motifId,
+                report,
+                false,
+                currentUser
+        );
+
+        report.addNbOK();
+        return;
+    }
+
+    if (!isEmpty(bordereauValue)) {
+        processSingleBordereau(
+                Long.valueOf(bordereauValue),
+                motifId,
+                report,
+                currentUser
+        );
+
+        report.addNbOK();
+        return;
+    }
+
+    throw new BusinessException("Aucune facture ni aucun bordereau à traiter.");
+}
+
+Exemple
+
+1001;;REJET
+1002;;REFUS
+;2001;REJET
+;2002;REFUS
+
+output :
+
+1001;;REJET;OK
+;2001;REJET;OK
+
+reject :
+
+1002;;REFUS;KO;Facture déjà avoirisée
