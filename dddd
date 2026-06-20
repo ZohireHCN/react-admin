@@ -1,27 +1,423 @@
 public class InvoiceCreditNoteMatchingScript extends Script {
 
+    private final CustomTableService customTableService =
+            (CustomTableService) getServiceInterface("CustomTableService");
+
+    private static final String INVOICE_TYPE_CREDIT_NOTE = "MS-AV";
+
+    private static final String MATCHING_STATUS_OPEN = "O";
+    private static final String MATCHING_STATUS_PARTIAL = "P";
+    private static final String MATCHING_STATUS_LITIGATION = "I";
+
+    private static final String QUERY_FIND_CREDIT_NOTE_AO =
+            "SELECT ao.id, ao.invoice_id " +
+            "FROM ar_account_operation ao " +
+            "JOIN billing_invoice inv ON inv.id = ao.invoice_id " +
+            "JOIN billing_invoice_type inv_type ON inv_type.id = inv.invoice_type_id " +
+            "WHERE ao.un_matching_amount > 0 " +
+            "AND ao.matching_status = :status " +
+            "AND inv_type.code = :invoiceType";
+
+    private static final String QUERY_FIND_INITIAL_INVOICE_ID =
+            "SELECT id_facture_initiale " +
+            "FROM ct_matching_invoice_credit_note " +
+            "WHERE id_avoir_interne = :creditNoteInvoiceId";
+
+    private static final String QUERY_FIND_ACCOUNT_OPERATION_BY_INVOICE_ID =
+            "SELECT id, matching_status, matching_amount " +
+            "FROM ar_account_operation " +
+            "WHERE invoice_id = :invoiceId";
+
+    private static final String QUERY_UPDATE_AO_MATCHING_STATUS =
+            "UPDATE ar_account_operation " +
+            "SET matching_status = :status " +
+            "WHERE id = :aoId";
+
+    private static final String QUERY_FIND_MATCHING_CODE_IDS =
+            "SELECT DISTINCT amc.id " +
+            "FROM ar_account_operation ao " +
+            "JOIN ar_matching_amount ama ON ama.account_operation_id = ao.id " +
+            "JOIN ar_matching_code amc ON amc.id = ama.matching_code_id " +
+            "WHERE ao.id = :aoId";
 
     @Override
     public void execute(Map<String, Object> context) throws BusinessException {
 
         ReportDto report = new ReportDto();
-        try {
 
+        try {
+            List<CreditNoteAoDto> creditNoteAos = findCreditNoteAccountOperations();
+
+            if (creditNoteAos.isEmpty()) {
+                report.addReport("Aucune AO d'avoir interne non lettrée à traiter.");
+                return;
+            }
+
+            for (CreditNoteAoDto creditNoteAo : creditNoteAos) {
+                try {
+                    processSingleCreditNoteAo(creditNoteAo, report);
+                    report.addNbOK();
+
+                } catch (Exception e) {
+                    report.addNbKO();
+                    report.addReport(
+                            "AO avoir interne KO "
+                                    + creditNoteAo.getAccountOperationId()
+                                    + " : "
+                                    + e.getMessage()
+                    );
+                }
+            }
 
         } catch (Exception e) {
             report.addReport(e.getMessage());
+
         } finally {
             flushReportInContext(context, report);
         }
     }
 
+    /**
+     * Traitement unitaire d'une AO d'avoir interne.
+     *
+     * Logique :
+     * 1. Identifier la facture initiale associée à l'avoir interne
+     * 2. Récupérer l'AO de la facture initiale
+     * 3. Annuler le litige si besoin
+     * 4. Délettrer l'AO de la facture initiale si besoin
+     * 5. Lettrer l'AO facture initiale avec l'AO avoir interne
+     */
+    private void processSingleCreditNoteAo(
+            CreditNoteAoDto creditNoteAo,
+            ReportDto report) throws BusinessException {
 
-    private void flushReportInContext(Map<String, Object> context, ReportDto reportDto) {
+        Long initialInvoiceId =
+                findInitialInvoiceIdByCreditNoteInvoiceId(
+                        creditNoteAo.getInvoiceId()
+                );
+
+        AccountOperationDto initialInvoiceAo =
+                findAccountOperationByInvoiceId(initialInvoiceId);
+
+        cancelLitigationIfNeeded(initialInvoiceAo);
+
+        if (initialInvoiceAo.getMatchingAmount() != null
+                && initialInvoiceAo.getMatchingAmount().compareTo(BigDecimal.ZERO) > 0) {
+
+            unmatchInitialInvoiceAccountOperation(initialInvoiceAo, report);
+        }
+
+        matchCreditNoteWithInitialInvoice(
+                creditNoteAo.getAccountOperationId(),
+                initialInvoiceAo.getAccountOperationId()
+        );
+    }
+
+    /**
+     * Étape 1 : sélection des AO d'avoir interne non lettrées.
+     */
+    private List<CreditNoteAoDto> findCreditNoteAccountOperations() {
+
+        List<?> rows = customTableService
+                .getEntityManager()
+                .createNativeQuery(QUERY_FIND_CREDIT_NOTE_AO)
+                .setParameter("status", MATCHING_STATUS_OPEN)
+                .setParameter("invoiceType", INVOICE_TYPE_CREDIT_NOTE)
+                .getResultList();
+
+        List<CreditNoteAoDto> result = new ArrayList<>();
+
+        for (Object rowObj : rows) {
+            Object[] row = (Object[]) rowObj;
+
+            result.add(
+                    new CreditNoteAoDto(
+                            toLong(row[0]),
+                            toLong(row[1])
+                    )
+            );
+        }
+
+        return result;
+    }
+
+    /**
+     * Étape 2 : récupération de la facture initiale liée à l'avoir interne.
+     */
+    private Long findInitialInvoiceIdByCreditNoteInvoiceId(
+            Long creditNoteInvoiceId) throws BusinessException {
+
+        try {
+            Object result = customTableService
+                    .getEntityManager()
+                    .createNativeQuery(QUERY_FIND_INITIAL_INVOICE_ID)
+                    .setParameter("creditNoteInvoiceId", creditNoteInvoiceId)
+                    .getSingleResult();
+
+            return toLong(result);
+
+        } catch (Exception e) {
+            throw new BusinessException(
+                    "Aucune facture initiale trouvée pour l'avoir interne "
+                            + creditNoteInvoiceId,
+                    e
+            );
+        }
+    }
+
+    /**
+     * Récupération de l'AO associée à une facture.
+     */
+    private AccountOperationDto findAccountOperationByInvoiceId(
+            Long invoiceId) throws BusinessException {
+
+        try {
+            Object[] row = (Object[]) customTableService
+                    .getEntityManager()
+                    .createNativeQuery(QUERY_FIND_ACCOUNT_OPERATION_BY_INVOICE_ID)
+                    .setParameter("invoiceId", invoiceId)
+                    .getSingleResult();
+
+            return new AccountOperationDto(
+                    toLong(row[0]),
+                    getString(row[1]),
+                    toBigDecimal(row[2])
+            );
+
+        } catch (Exception e) {
+            throw new BusinessException(
+                    "Aucune AO trouvée pour la facture initiale " + invoiceId,
+                    e
+            );
+        }
+    }
+
+    /**
+     * Étape 3 : annulation du litige si l'AO initiale est en litige.
+     */
+    private void cancelLitigationIfNeeded(
+            AccountOperationDto initialInvoiceAo) throws BusinessException {
+
+        if (!MATCHING_STATUS_LITIGATION.equals(initialInvoiceAo.getMatchingStatus())) {
+            return;
+        }
+
+        if (initialInvoiceAo.getMatchingAmount() != null
+                && initialInvoiceAo.getMatchingAmount().compareTo(BigDecimal.ZERO) > 0) {
+
+            updateAccountOperationMatchingStatus(
+                    initialInvoiceAo.getAccountOperationId(),
+                    MATCHING_STATUS_PARTIAL
+            );
+
+        } else {
+            updateAccountOperationMatchingStatus(
+                    initialInvoiceAo.getAccountOperationId(),
+                    MATCHING_STATUS_OPEN
+            );
+        }
+
+        /*
+         * Si un service Opencell cancelLitigation est disponible,
+         * remplacer l'update direct par l'appel service :
+         *
+         * POST /accountOperation/cancelLitigation
+         */
+    }
+
+    private void updateAccountOperationMatchingStatus(
+            Long accountOperationId,
+            String status) {
+
+        customTableService
+                .getEntityManager()
+                .createNativeQuery(QUERY_UPDATE_AO_MATCHING_STATUS)
+                .setParameter("status", status)
+                .setParameter("aoId", accountOperationId)
+                .executeUpdate();
+    }
+
+    /**
+     * Étape 4 : délettrage de l'AO facture initiale si elle a déjà des montants lettrés.
+     */
+    private void unmatchInitialInvoiceAccountOperation(
+            AccountOperationDto initialInvoiceAo,
+            ReportDto report) throws BusinessException {
+
+        List<Long> matchingCodeIds =
+                findMatchingCodeIdsByAccountOperationId(
+                        initialInvoiceAo.getAccountOperationId()
+                );
+
+        for (Long matchingCodeId : matchingCodeIds) {
+            unmatchAccountOperation(initialInvoiceAo.getAccountOperationId(), matchingCodeId);
+            report.addNbWARN();
+        }
+    }
+
+    private List<Long> findMatchingCodeIdsByAccountOperationId(
+            Long accountOperationId) {
+
+        List<?> rows = customTableService
+                .getEntityManager()
+                .createNativeQuery(QUERY_FIND_MATCHING_CODE_IDS)
+                .setParameter("aoId", accountOperationId)
+                .getResultList();
+
+        return rows.stream()
+                .map(this::toLong)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * TODO à brancher sur le service réel de délettrage.
+     *
+     * Le besoin indique qu'il existe déjà le job :
+     * UNMATCHING_ACCOUNT_OPERATIONS
+     */
+    private void unmatchAccountOperation(
+            Long accountOperationId,
+            Long matchingCodeId) throws BusinessException {
+
+        /*
+         * TODO :
+         * Appeler le service ou le job de délettrage existant.
+         *
+         * Exemple conceptuel :
+         *
+         * unmatchingService.unmatch(accountOperationId, matchingCodeId);
+         */
+
+        throw new BusinessException(
+                "TODO délettrage AO "
+                        + accountOperationId
+                        + " / matchingCode "
+                        + matchingCodeId
+        );
+    }
+
+    /**
+     * Étape 5 : lettrage AO facture initiale avec AO avoir interne.
+     */
+    private void matchCreditNoteWithInitialInvoice(
+            Long creditNoteAccountOperationId,
+            Long initialInvoiceAccountOperationId) throws BusinessException {
+
+        /*
+         * TODO :
+         * Brancher ici le service réel :
+         *
+         * POST /accountOperation/matchOperations
+         *
+         * avec les deux AO :
+         * - creditNoteAccountOperationId
+         * - initialInvoiceAccountOperationId
+         */
+
+        throw new BusinessException(
+                "TODO lettrage AO avoir interne "
+                        + creditNoteAccountOperationId
+                        + " avec AO facture initiale "
+                        + initialInvoiceAccountOperationId
+        );
+    }
+
+    private Long toLong(Object value) {
+        if (value == null) {
+            return null;
+        }
+
+        if (value instanceof Number) {
+            return ((Number) value).longValue();
+        }
+
+        return Long.valueOf(value.toString());
+    }
+
+    private BigDecimal toBigDecimal(Object value) {
+        if (value == null) {
+            return BigDecimal.ZERO;
+        }
+
+        if (value instanceof BigDecimal) {
+            return (BigDecimal) value;
+        }
+
+        if (value instanceof Number) {
+            return BigDecimal.valueOf(((Number) value).doubleValue());
+        }
+
+        return new BigDecimal(value.toString());
+    }
+
+    private String getString(Object value) {
+        return value != null ? value.toString() : null;
+    }
+
+    private void flushReportInContext(
+            Map<String, Object> context,
+            ReportDto reportDto) {
+
         context.put(Script.JOB_RESULT_NB_OK, reportDto.getNbOK());
         context.put(Script.JOB_RESULT_NB_KO, reportDto.getNbKO());
         context.put(Script.JOB_RESULT_NB_WARN, reportDto.getNbWARN());
+
         if (!reportDto.getReportMessage().isEmpty()) {
-            context.put(Script.JOB_RESULT_REPORT, reportDto.getReportMessage());
+            context.put(
+                    Script.JOB_RESULT_REPORT,
+                    reportDto.getReportMessage()
+            );
+        }
+    }
+
+    private static class CreditNoteAoDto {
+
+        private final Long accountOperationId;
+        private final Long invoiceId;
+
+        CreditNoteAoDto(
+                Long accountOperationId,
+                Long invoiceId) {
+
+            this.accountOperationId = accountOperationId;
+            this.invoiceId = invoiceId;
+        }
+
+        public Long getAccountOperationId() {
+            return accountOperationId;
+        }
+
+        public Long getInvoiceId() {
+            return invoiceId;
+        }
+    }
+
+    private static class AccountOperationDto {
+
+        private final Long accountOperationId;
+        private final String matchingStatus;
+        private final BigDecimal matchingAmount;
+
+        AccountOperationDto(
+                Long accountOperationId,
+                String matchingStatus,
+                BigDecimal matchingAmount) {
+
+            this.accountOperationId = accountOperationId;
+            this.matchingStatus = matchingStatus;
+            this.matchingAmount = matchingAmount;
+        }
+
+        public Long getAccountOperationId() {
+            return accountOperationId;
+        }
+
+        public String getMatchingStatus() {
+            return matchingStatus;
+        }
+
+        public BigDecimal getMatchingAmount() {
+            return matchingAmount;
         }
     }
 
@@ -60,7 +456,7 @@ public class InvoiceCreditNoteMatchingScript extends Script {
         public void addNbWARN() {
             this.nbWARN++;
         }
-        
+
         public void addReport(String message) {
             if (reportBuilder.length() > 0) {
                 reportBuilder.append(System.lineSeparator());
