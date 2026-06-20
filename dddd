@@ -1,89 +1,72 @@
+public class InvoiceCreditNoteMatchingScript extends Script {
 
-C’est probablement un problème d’encodage Excel.
 
-Actuellement tu écris :
+    @Override
+    public void execute(Map<String, Object> context) throws BusinessException {
 
-Files.write(
-    getOutputDirectoryPath().resolve(fileName),
-    lines,
-    StandardCharsets.UTF_8,
-    StandardOpenOption.CREATE,
-    StandardOpenOption.TRUNCATE_EXISTING
-);
+        ReportDto report = new ReportDto();
+        try {
 
-Le fichier est bien en UTF-8, mais Excel ouvre souvent les CSV UTF-8 sans BOM et affiche :
 
-é => Ã©
-à => Ã
+        } catch (Exception e) {
+            report.addReport(e.getMessage());
+        } finally {
+            flushReportInContext(context, report);
+        }
+    }
 
-Solution 1 (recommandée)
 
-Ajouter le BOM UTF-8 :
+    private void flushReportInContext(Map<String, Object> context, ReportDto reportDto) {
+        context.put(Script.JOB_RESULT_NB_OK, reportDto.getNbOK());
+        context.put(Script.JOB_RESULT_NB_KO, reportDto.getNbKO());
+        context.put(Script.JOB_RESULT_NB_WARN, reportDto.getNbWARN());
+        if (!reportDto.getReportMessage().isEmpty()) {
+            context.put(Script.JOB_RESULT_REPORT, reportDto.getReportMessage());
+        }
+    }
 
-private void writeCsvFile(Path file, List<String> lines) throws IOException {
+    private static class ReportDto {
 
-    try (BufferedWriter writer = Files.newBufferedWriter(
-            file,
-            StandardCharsets.UTF_8,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING)) {
+        private int nbOK;
+        private int nbKO;
+        private int nbWARN;
 
-        writer.write('\uFEFF'); // UTF-8 BOM
+        private final StringBuilder reportBuilder = new StringBuilder();
 
-        for (String line : lines) {
-            writer.write(line);
-            writer.newLine();
+        public int getNbOK() {
+            return nbOK;
+        }
+
+        public int getNbKO() {
+            return nbKO;
+        }
+
+        public int getNbWARN() {
+            return nbWARN;
+        }
+
+        public String getReportMessage() {
+            return reportBuilder.toString();
+        }
+
+        public void addNbOK() {
+            this.nbOK++;
+        }
+
+        public void addNbKO() {
+            this.nbKO++;
+        }
+
+        public void addNbWARN() {
+            this.nbWARN++;
+        }
+        
+        public void addReport(String message) {
+            if (reportBuilder.length() > 0) {
+                reportBuilder.append(System.lineSeparator());
+            }
+
+            reportBuilder.append(message);
         }
     }
 }
-
-Puis :
-
-private void writeOutputFile(Path inputFile, List<String> lines) throws IOException {
-
-    String fileName =
-            removeExtension(inputFile.getFileName().toString()) + "_output.csv";
-
-    writeCsvFile(
-            getOutputDirectoryPath().resolve(fileName),
-            lines
-    );
-}
-
-private void writeRejectFile(Path inputFile, List<String> lines) throws IOException {
-
-    if (lines.size() <= 1) {
-        return;
-    }
-
-    String fileName =
-            removeExtension(inputFile.getFileName().toString()) + "_reject.csv";
-
-    writeCsvFile(
-            getRejectDirectoryPath().resolve(fileName),
-            lines
-    );
-}
-
-Solution 2 (si les utilisateurs ouvrent uniquement avec Excel Windows)
-
-Écrire en :
-
-Charset.forName("windows-1252")
-
-mais je ne recommande pas.
-
-Le plus propre aujourd’hui est :
-
-UTF-8 + BOM
-
-qui affichera correctement :
-
-é
-è
-ê
-à
-ù
-ç
-
-dans Excel, Notepad++ et VS Code.
