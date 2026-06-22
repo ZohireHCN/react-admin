@@ -1,591 +1,256 @@
+private void applyInvoiceRebillingWithRevalorisation(Invoice invoice) throws BusinessException {
+    String otId = getOtForInvoice(invoice);
 
-
-public class InvoiceAvecRevalorisationScript extends Script {
-
-    private final CustomTableService customTableService = (CustomTableService) getServiceInterface("CustomTableService");
-    private final InvoiceService invoiceService = (InvoiceService) getServiceInterface(InvoiceService.class.getSimpleName());
-    private final RatedTransactionService ratedTransactionService = (RatedTransactionService) getServiceInterface(RatedTransactionService.class.getSimpleName());
-    private final ProviderService providerService = (ProviderService) getServiceInterface(ProviderService.class.getSimpleName());
-    private final JobInstanceService jobInstanceService = (JobInstanceService) getServiceInterface(JobInstanceService.class.getSimpleName());
-    private final JobExecutionService jobExecutionService = (JobExecutionService) getServiceInterface(JobExecutionService.class.getSimpleName());
-
-    private static final String QUERY_FIND_INVOICE_BY_ID = "SELECT i FROM Invoice i WHERE i.id = :id";
-    private static final String QUERY_FIND_INVOICE_BY_BRD_ID = "SELECT invoice_id FROM ct_bordereau_invoice WHERE bordereau_id = :id";
-    private static final String QUERY_FIND_BRD_BY_BRD_ID = "SELECT id,cancelled,rebilled FROM ct_bordereaux ctb WHERE ctb.id =:id";
-    private static final String QUERY_IS_IN_BR_BY_ID = "SELECT COUNT(*) FROM ct_bordereau_invoice cbi WHERE cbi.invoice_id = :id";
-    private static final String QUERY_CANCELLED_BR_BY_ID = "UPDATE ct_bordereaux SET rebilled=TRUE WHERE id=:id";
-
-    private static final String INVOICES_ID_JOB_PARAM = "factures";
-    private static final String BORDEREAUX_ID_JOB_PARAM = "bordereaux";
-
-    private static final String IMPORTS_DIR = "imports";
-    private static final String INVOICES_DIR = "invoices";
-    private static final String AVOIRS_DIR = "refac_avec_revalo";
-    private static final String INPUT_SUBDIR = "input";
-    private static final String OUTPUT_SUBDIR = "output";
-    private static final String REJECT_SUBDIR = "reject";
-    private static final String ARCHIVE_SUBDIR = "archive";
-
-    public static final String CF_INV_REBILLED = "cf_inv_rebilled";
-    private static final String INVOICE_CF_CANCELLED_KEY = "cf_inv_cancelled";
-
-    private static final String MSG_INIT_DIRECTORIES = "Initialisation des dossiers effectuée";
-    private static final String MSG_FACTURE_NI_BORDEREAU_A_TRAITER = "Pas de facture ni bordereau à traiter";
-    private static final String MSG_FAIT_PARTIE_D_UN_BORDEREAU = " fait partie d’un bordereau";
-    private static final String MSG_FORMAT_FICHIER_INVALIDE = "Format invalide : FACTURE;BORDEREAU attendu";
-
-    private static final String REOUVERTURE_OPERATION_TRAITEMENT = "ReouvertureOperationTraitement";
-    private static final String SCRIPTING_JOB_VARIABLES = "ScriptingJob_variables";
-    private static final String IDS_OPERATION_TRAITEMENT = "idsOperationTraitement";
-
-    public static final String N_EST_PAS_ELIGIBLE_A_LA_REFACTURATION = " n'est pas éligible à la refacturation";
-    public static final String ERREUR_TRAITEMENT_FICHIER = "Erreur traitement fichier ";
-
-    @Override
-    public void execute(Map<String, Object> context) throws BusinessException {
-
-        ReportDto report = new ReportDto();
-        String invoicesParam = getStringParam(context, INVOICES_ID_JOB_PARAM);
-        String bordereauxParam = getStringParam(context, BORDEREAUX_ID_JOB_PARAM);
-        MeveoUser currentUser = (MeveoUser) context.get(Script.CONTEXT_CURRENT_USER);
-        try {
-            if (isEmpty(invoicesParam) && isEmpty(bordereauxParam)) {
-                if (hasInputFiles()) {
-                    processInputFiles(report, currentUser);
-                }
-                else {
-                    initializeDirectoriesIfNeeded(report);
-                    return;
-                }
-                return;
-            }
-            if (!isEmpty(invoicesParam)) processInvoices(parseIds(invoicesParam), report);
-            if (!isEmpty(bordereauxParam)) processBordereaux(parseIds(bordereauxParam), report);
-        } catch (Exception e) {
-            report.addReport(e.getMessage());
-        } finally {
-            flushReportInContext(context, report);
-        }
-    }
-    private void processInvoices(List<Long> invoiceIds, ReportDto report) {
-        invoiceIds.forEach(invoiceId -> {
-            try {
-                processSingleInvoice(invoiceId);
-                report.addNbOK();
-            } catch (Exception e) {
-                report.addReport("Facture " + invoiceId + " KO : " + e.getMessage());
-                report.addNbKO();
-            }
-        });
+    if (StringUtils.isNotBlank(otId)) {
+        processReouvertureOpeTrait(otId);
     }
 
-    private void processBordereaux(List<Long> bordereauIds, ReportDto report) {
-        bordereauIds.forEach(bordereauId -> {
-            try {
-                processSingleBordereau(bordereauId);
-                report.addNbOK();
-            } catch (Exception e) {
-                report.addReport("Bordereau " + bordereauId + " KO : " + e.getMessage());
-                report.addNbKO();
-            }
-        });
+    updateInvoiceRebilled(invoice);
+}
+
+private String getOtForInvoice(Invoice invoice) {
+    List<RatedTransaction> ratedTransactions =
+            ratedTransactionService.getRatedTransactionsByInvoice(invoice, true);
+
+    return ratedTransactions.stream()
+            .map(RatedTransaction::getParameter2)
+            .filter(StringUtils::isNotBlank)
+            .map(String::trim)
+            .findFirst()
+            .orElse(null);
+}
+
+private void processReouvertureOpeTrait(String otId) {
+    Long operationTraitementId = parseOperationTraitementId(otId);
+    EntityManager em = customTableService.getEntityManager();
+
+    updateCdrAsAbandoned(em, operationTraitementId);
+
+    deleteBillableConsumption(em, operationTraitementId);
+
+    updatePodMaco(em, operationTraitementId);
+
+    deleteBillableSubscription(em, operationTraitementId);
+
+    deleteBillableFee(em, operationTraitementId);
+
+    updatePreviousConsumptionIfNeeded(em, operationTraitementId);
+
+    updateMeterReadingHeader(em, operationTraitementId);
+
+    updateDailyMeterReadingHeader(em, operationTraitementId);
+
+    updateProcessingOperationAsToTreat(em, operationTraitementId);
+
+    updateFeeAsToTreat(em, operationTraitementId);
+
+    deleteCustomTableOperationTraitement(em, operationTraitementId);
+
+    deleteCustomTableLignesFacturables(em, operationTraitementId);
+}
+
+private Long parseOperationTraitementId(String otId) {
+    if (StringUtils.isBlank(otId)) {
+        throw new BusinessException("Identifiant opération traitement vide");
     }
 
-    private void processSingleInvoice(Long invoiceId) throws BusinessException {
-        Invoice invoice = checkInvoiceEligibility(invoiceId,false);
-        applyInvoiceRebillingWithRevalorisation(invoice);
-    }
-
-    private int processSingleBordereau(Long bordereauId) throws BusinessException {
-        checkBordereauEligibility(bordereauId);
-        List<Long> invoiceIds = findInvoiceIdsByBordereauId(bordereauId);
-        if (invoiceIds.isEmpty()) {
-            throw new BusinessException("Bordereau " + bordereauId + " sans facture");
-        }
-        List<Invoice> invoices = new ArrayList<>();
-        for (Long invoiceId : invoiceIds) {
-            invoices.add(checkInvoiceEligibility(invoiceId, true));
-        }
-        for (Invoice invoice : invoices) {
-            applyInvoiceRebillingWithRevalorisation(invoice);
-        }
-        updateBordereauAsRebilled(bordereauId);
-        return invoices.size();
-    }
-
-    private Invoice checkInvoiceEligibility(
-            Long invoiceId,
-            boolean fromBordereau) throws BusinessException {
-        Invoice invoice = findInvoiceById(invoiceId);
-        if (invoice == null) {
-            throw new BusinessException( invoiceId + " introuvable ou non éligible");
-        }
-        if (!fromBordereau && isInvoiceAttachedToBordereau(invoiceId)) {
-            throw new BusinessException( invoiceId + MSG_FAIT_PARTIE_D_UN_BORDEREAU);
-        }
-        if (!isEligibleRefacturation(invoice)) {
-            throw new BusinessException( invoiceId + N_EST_PAS_ELIGIBLE_A_LA_REFACTURATION);
-        }
-        return invoice;
-    }
-
-    private void checkBordereauEligibility(
-            Long bordereauId) throws BusinessException {
-        BordereauDto bordereau = findBordereauById(bordereauId);
-        if (!isBordereauEligible(bordereau)) throw new BusinessException("Bordereau " + bordereauId + " non éligible");
-    }
-
-    private void applyInvoiceRebillingWithRevalorisation(Invoice invoice) throws BusinessException {
-        List<String> idOts = getAllOtForInvoice(invoice);
-        idOts = idOts.stream().distinct().collect(Collectors.toList());
-        if (!idOts.isEmpty()) {
-            try {
-                processReouvertureOpeTrait(String.join(",",idOts));
-            } catch (Exception e) {
-                throw new RuntimeException(e);
-            }
-        }
-        updateInvoiceRebilled(invoice);
-    }
-
-    private void processReouvertureOpeTrait(String otIdsString) {
-        EntityManager em = customTableService.getEntityManager();
-        String whereClause = buildWhereClause(otIdsString);
-        String update_maco_d_cdr_query = "UPDATE maco_d_cdr SET status='ABANDONED' WHERE status='SENT' and parameter_5 in " + whereClause;
-        em.createNativeQuery(update_maco_d_cdr_query).executeUpdate();
-        em.flush();
-
-        String delete_maco_d_billable_consumption_query = "DELETE FROM maco_d_billable_consumption WHERE id_operation_traitement in (" + otIdsString + ")";
-        em.createNativeQuery(delete_maco_d_billable_consumption_query).executeUpdate();
-        em.flush();
-
-        String update_maco_d_pod_maco_query = "UPDATE maco_d_pod_maco SET billing_method_changed = true, echu_oper = true  where id in ( select id from (select id, ext_id, validity_end_date, rank() over (partition by ext_id order by validity_end_date desc) as rownum from maco_d_pod_maco) as last_validity_sq where rownum=1 and ext_id in ( select distinct prm_id from maco_d_processing_operation where id in (select distinct echoir.id_operation_traitement from maco_d_billable_subscription echoir join maco_d_billable_subscription echu on (echoir.id_operation_traitement=echu.id_operation_traitement) where echoir.type_abo='A_ECHOIR' and echu.type_abo='ECHU' and echoir.id_operation_traitement in (P_OT_IDS) and echu.id_operation_traitement in (P_OT_IDS))))";
-        update_maco_d_pod_maco_query = update_maco_d_pod_maco_query.replaceAll("P_OT_IDS", otIdsString);
-        em.createNativeQuery(update_maco_d_pod_maco_query).executeUpdate();
-        em.flush();
-
-        String delete_abo_facturable_query = "DELETE FROM maco_d_billable_subscription WHERE id_operation_traitement IN (" + otIdsString + ")";
-        em.createNativeQuery(delete_abo_facturable_query).executeUpdate();
-        em.flush();
-
-        String delete_maco_d_billable_fee = "DELETE FROM maco_d_billable_fee WHERE id_operation_traitement IN (" + otIdsString + ")";
-        em.createNativeQuery(delete_maco_d_billable_fee).executeUpdate();
-        em.flush();
-
-        String select_maco_d_processing_operation_2 = "select target.id, count(target.prm_id) from maco_d_processing_operation orig join maco_d_processing_operation target on ( orig.prm_id=target.prm_id and target.status_code='TREATED' and target.operation_type in ('PLANIFIEE', 'MES') and ((date(orig.start_date)-1)=date(target.end_date) or date(orig.start_date)=date(target.end_date)) ) where orig.id in (P_OT_IDS) group by target.id, target.prm_id";
-        select_maco_d_processing_operation_2 = select_maco_d_processing_operation_2.replaceAll("P_OT_IDS", otIdsString);
-        @SuppressWarnings("unchecked")
-        List<Object[]> targetOpIds2 = em.createNativeQuery(select_maco_d_processing_operation_2).getResultList();
-        if (CollectionUtils.isNotEmpty(targetOpIds2)) {
-            List<Long> idsToUpdate = new ArrayList<>();
-            for (Object[] line : targetOpIds2) {
-                BigInteger otIdInErr = (BigInteger) line[0];
-                BigInteger count = (BigInteger) line[1];
-                 if (count != null && count.compareTo(BigInteger.ONE) == 0) {
-                    idsToUpdate.add(otIdInErr.longValue());
-                }
-            }
-            if (CollectionUtils.isNotEmpty(idsToUpdate)) {
-                String update_maco_d_billable_consumption_query = "update maco_d_billable_consumption set status_code='NOT_DEDUCTED' where id_operation_traitement in (" + StringUtils.join(idsToUpdate, ",")
-                        + ") and status_code='DEDUCTED'";
-                em.createNativeQuery(update_maco_d_billable_consumption_query).executeUpdate();
-                em.flush();
-            }
-        }
-
-
-        String update_maco_d_meter_reading_header_query = "UPDATE maco_d_meter_reading_header SET id_operation_traitement = (CASE WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES') THEN NULL ELSE id_operation_traitement END), status_code = 'TO_TREAT' FROM maco_d_processing_operation WHERE id_operation_traitement=maco_d_processing_operation.id AND id_operation_traitement in ("
-                    + otIdsString + ")";
-        em.createNativeQuery(update_maco_d_meter_reading_header_query).executeUpdate();
-        em.flush();
-
-        String maco_d_daily_meter_ready_header_query = "UPDATE maco_d_daily_meter_ready_header SET id_operation_traitement = (CASE WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES') THEN NULL ELSE id_operation_traitement END) FROM maco_d_processing_operation WHERE id_operation_traitement=maco_d_processing_operation.id AND id_operation_traitement in ("
-                    + otIdsString + ")";
-        em.createNativeQuery(maco_d_daily_meter_ready_header_query).executeUpdate();
-        em.flush();
-
-        String update_maco_d_processing_operation_query = "update maco_d_processing_operation set status_code='TO_TREAT' where id in (" + otIdsString + ")";
-        em.createNativeQuery(update_maco_d_processing_operation_query).executeUpdate();
-        em.flush();
-
-        String update_maco_d_fee_query = "UPDATE maco_d_fee SET id_operation_traitement = (CASE WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES', 'FRAIS_SEUL') THEN NULL ELSE maco_d_fee.id_operation_traitement END), operation_start_date = (CASE WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES', 'FRAIS_SEUL') THEN NULL ELSE maco_d_fee.operation_start_date END), operation_end_date = (CASE WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES', 'FRAIS_SEUL') THEN NULL ELSE maco_d_fee.operation_end_date END), operation_type = (CASE WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES', 'FRAIS_SEUL') THEN NULL ELSE maco_d_fee.operation_type END), status_code='TO_TREAT' FROM maco_d_processing_operation WHERE id_operation_traitement=maco_d_processing_operation.id AND id_operation_traitement in ("
-                + otIdsString + ")";
-
-        em.createNativeQuery(update_maco_d_fee_query).executeUpdate();
-        em.flush();
-
-        String update_ct_operation_traitement_query = "DELETE FROM ct_operation_traitement  WHERE id_operation_traitement in (" + otIdsString + ")";
-        em.createNativeQuery(update_ct_operation_traitement_query).executeUpdate();
-        em.flush();
-
-        if (StringUtils.isNotBlank(whereClause)) {
-            String delete_ct_lignes_facturables_query = "DELETE FROM ct_lignes_facturables  WHERE parameter_5 in " + whereClause;
-            em.createNativeQuery(delete_ct_lignes_facturables_query).executeUpdate();
-            em.flush();
-        }
-
-    }
-
-    private List<String> getAllOtForInvoice(Invoice invoice) {
-
-        List<RatedTransaction> ratedTransactions =
-                ratedTransactionService.getRatedTransactionsByInvoice(invoice, true);
-
-        return ratedTransactions.stream()
-                .map(RatedTransaction::getParameter2)
-                .filter(Objects::nonNull)
-                .filter(value -> !value.trim().isEmpty())
-                .collect(Collectors.toList());
-    }
-
-    private void updateInvoiceRebilled(Invoice invoice) {
-        CustomFieldValues invoiceCfValues = invoice.getCfValues();
-        invoiceCfValues.setValue(CF_INV_REBILLED, true);
-        invoice.setCfValues(invoiceCfValues);
-        invoiceService.update(invoice);
-    }
-
-    private Boolean isEligibleRefacturation(Invoice invoice) {
-        CustomFieldValues invoiceCfValues = invoice.getCfValues();
-        Boolean cancelled = (Boolean) invoiceCfValues.getValue(INVOICE_CF_CANCELLED_KEY);
-        Boolean rebilled = (Boolean) invoiceCfValues.getValue(CF_INV_REBILLED);
-        return Boolean.TRUE.equals(cancelled)
-                && !Boolean.TRUE.equals(rebilled);
-    }
-
-    private boolean isBordereauEligible(BordereauDto bordereau) {
-        Boolean cancelled = bordereau.getCancelled();
-        Boolean rebilled = bordereau.getRebilled();
-        return Boolean.TRUE.equals(cancelled)
-                && !Boolean.TRUE.equals(rebilled);
-    }
-
-    private boolean hasInputFiles() throws IOException {
-        try (Stream<Path> files = Files.list(getInputDirectoryPath())) {
-            return files.anyMatch(Files::isRegularFile);
-        }
-    }
-
-    private void processInputFiles(
-            ReportDto report,
-            MeveoUser currentUser) throws IOException {
-        try (Stream<Path> files = Files.list(getInputDirectoryPath())) {
-            files.filter(Files::isRegularFile)
-                    .forEach(file -> {
-                        try {
-                            processSingleInputFile(file, report, currentUser);
-                        } catch (Exception e) {
-                            report.addReport(ERREUR_TRAITEMENT_FICHIER + file.getFileName() + " : " + e.getMessage());
-                            report.addNbKO();
-                        }
-                    });
-        }
-    }
-
-    private void processSingleInputFile(Path inputFile, ReportDto report, MeveoUser currentUser) throws Exception {
-        List<String> lines = Files.readAllLines(inputFile, StandardCharsets.UTF_8);
-        if (lines.isEmpty()) {
-            throw new BusinessException(MSG_FACTURE_NI_BORDEREAU_A_TRAITER);
-        }
-        List<String> outputLines = new ArrayList<>();
-        List<String> rejectLines = new ArrayList<>();
-        outputLines.add("FACTURE;BORDEREAU;RESULT");
-        rejectLines.add("FACTURE;BORDEREAU;ERROR");
-        for (String line : lines) {
-            if (isEmpty(line)) {
-                continue;
-            }
-            try {
-                processInputLine(line, report, currentUser);
-                outputLines.add(line + ";OK");
-            } catch (Exception e) {
-                rejectLines.add(line + ";" + e.getMessage());
-                report.addReport(e.getMessage());
-                report.addNbKO();
-            }
-        }
-        writeOutputFile(inputFile, outputLines);
-        writeRejectFile(inputFile, rejectLines);
-        moveFileToArchive(inputFile);
-    }
-
-    private void processInputLine(String line, ReportDto report, MeveoUser currentUser) throws BusinessException {
-        String[] values = line.split(";", -1);
-        if (values.length < 2) {
-            throw new BusinessException(MSG_FORMAT_FICHIER_INVALIDE);
-        }
-        String invoiceValue = values[0].trim();
-        String bordereauValue = values[1].trim();
-        if (!isEmpty(invoiceValue)) {
-            processSingleInvoice(Long.valueOf(invoiceValue));
-            report.addNbOK();
-            return;
-        }
-        if (!isEmpty(bordereauValue)) {
-            int nbInvoices = processSingleBordereau(Long.valueOf(bordereauValue));
-            report.addNbOK();
-            report.addNbWARN(nbInvoices);
-            return;
-        }
-        throw new BusinessException(MSG_FACTURE_NI_BORDEREAU_A_TRAITER);
-    }
-
-    private Invoice findInvoiceById(Long invoiceId) {
-        try {
-            return this.invoiceService
-                    .getEntityManager()
-                    .createQuery(QUERY_FIND_INVOICE_BY_ID, Invoice.class)
-                    .setParameter("id", invoiceId)
-                    .getSingleResult();
-        } catch (Exception e) {
-            throw new BusinessException("Introuvable ou non éligible");
-        }
-    }
-
-    private boolean isInvoiceAttachedToBordereau(Long invoiceId) {
-        int count = Integer.parseInt(
-                customTableService.getEntityManager()
-                        .createNativeQuery(QUERY_IS_IN_BR_BY_ID)
-                        .setParameter("id", invoiceId)
-                        .getSingleResult()
-                        .toString()
-        );
-
-        return count > 0;
-    }
-
-    private BordereauDto findBordereauById(Long bordereauId) {
-        try {
-            Object[] row = (Object[]) customTableService
-                    .getEntityManager()
-                    .createNativeQuery(QUERY_FIND_BRD_BY_BRD_ID)
-                    .setParameter("id", bordereauId)
-                    .getSingleResult();
-
-            return new BordereauDto(
-                    Long.valueOf(row[0].toString()),
-                    (Boolean) row[1],
-                    (Boolean) row[2]
-            );
-
-        } catch (Exception e) {
-            throw new BusinessException("Introuvable ou non éligible");
-        }
-    }
-
-    private List<Long> findInvoiceIdsByBordereauId(Long bordereauId) {
-        List<?> ids = this.customTableService
-                .getEntityManager()
-                .createNativeQuery(QUERY_FIND_INVOICE_BY_BRD_ID)
-                .setParameter("id", bordereauId)
-                .getResultList();
-
-        return ids.stream()
-                .map(id -> ((Number) id).longValue())
-                .collect(Collectors.toList());
-    }
-
-    private void updateBordereauAsRebilled(Long bordereauId) {
-        customTableService
-                .getEntityManager()
-                .createNativeQuery(QUERY_CANCELLED_BR_BY_ID)
-                .setParameter("id", bordereauId)
-                .executeUpdate();
-    }
-
-    private List<Long> parseIds(String value) {
-        return Arrays.stream(value.split(";")).map(String::trim).filter(v -> !v.isEmpty()).map(Long::valueOf).collect(Collectors.toList());
-    }
-
-    private void initializeDirectoriesIfNeeded(ReportDto report) throws IOException {
-        Path inputDirectory = getInputDirectoryPath();
-        if (Files.notExists(inputDirectory)) {
-            initDirectories();
-            report.addReport(MSG_INIT_DIRECTORIES);
-        }
-    }
-
-    private void initDirectories() throws IOException {
-        Path baseDirectory = getBaseDirectoryPath();
-        List<Path> directories = List.of(
-                baseDirectory.resolve(INPUT_SUBDIR),
-                baseDirectory.resolve(OUTPUT_SUBDIR),
-                baseDirectory.resolve(REJECT_SUBDIR),
-                baseDirectory.resolve(ARCHIVE_SUBDIR)
-        );
-        for (Path directory : directories) {
-            Files.createDirectories(directory);
-        }
-    }
-
-    private Path getInputDirectoryPath() {
-        return getBaseDirectoryPath().resolve(INPUT_SUBDIR);
-    }
-
-    private Path getBaseDirectoryPath() {
-        return Path.of(getProviderDir(), IMPORTS_DIR, INVOICES_DIR, AVOIRS_DIR);
-    }
-
-    private String getProviderDir() {
-        String providerDir = ParamBean.getInstance()
-                .getChrootDir(providerService.getProvider().getCode());
-        File directory = new File(providerDir);
-        if (!directory.exists()) {
-            directory.mkdirs();
-        }
-        return providerDir;
-    }
-
-    private String getStringParam(Map<String, Object> context, String key) {
-        Object value = context.get(key);
-        return value != null ? value.toString().trim() : "";
-    }
-
-    private boolean isEmpty(String value) {
-        return value == null || value.trim().isEmpty();
-    }
-
-    private void flushReportInContext(Map<String, Object> context, ReportDto reportDto) {
-        context.put(Script.JOB_RESULT_NB_OK, reportDto.getNbOK());
-        context.put(Script.JOB_RESULT_NB_KO, reportDto.getNbKO());
-        context.put(Script.JOB_RESULT_NB_WARN, reportDto.getNbWARN());
-        if (!reportDto.getReportMessage().isEmpty()) {
-            context.put(Script.JOB_RESULT_REPORT, reportDto.getReportMessage());
-        }
-    }
-
-    private void writeOutputFile(Path inputFile, List<String> lines) throws IOException {
-        String fileName = removeExtension(inputFile.getFileName().toString()) + "_output.csv";
-        Files.write(getOutputDirectoryPath().resolve(fileName), lines, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING
-        );
-    }
-
-    private void writeRejectFile(Path inputFile, List<String> lines) throws IOException {
-
-        if (lines.size() <= 1) return;
-        String fileName = removeExtension(inputFile.getFileName().toString()) + "_reject.csv";
-        Files.write(getRejectDirectoryPath().resolve(fileName), lines, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-    }
-
-    private void moveFileToArchive(Path inputFile) throws IOException {
-        Files.move(
-                inputFile,
-                getArchiveDirectoryPath().resolve(inputFile.getFileName()),
-                StandardCopyOption.REPLACE_EXISTING
-        );
-    }
-
-
-
-    private String buildWhereClause(String otIdsString) {
-        StringBuilder whereClauseBuilder = new StringBuilder("(");
-        String[] splitedOtIdsString = otIdsString.split(",");
-        if (splitedOtIdsString != null && splitedOtIdsString.length > 0) {
-            int idsLenth = splitedOtIdsString.length;
-            int c = 0;
-            for (String otId : splitedOtIdsString) {
-                whereClauseBuilder.append("'").append(otId.trim()).append("'");
-                if (c != idsLenth - 1) {
-                    whereClauseBuilder.append(",");
-                }
-                c++;
-            }
-        } else {
-            return null;
-        }
-        return whereClauseBuilder.append(")").toString();
-    }
-
-
-    private Path getOutputDirectoryPath() {
-        return getBaseDirectoryPath().resolve(OUTPUT_SUBDIR);
-    }
-
-    private Path getRejectDirectoryPath() {
-        return getBaseDirectoryPath().resolve(REJECT_SUBDIR);
-    }
-
-    private Path getArchiveDirectoryPath() {
-        return getBaseDirectoryPath().resolve(ARCHIVE_SUBDIR);
-    }
-
-    private String removeExtension(String fileName) {
-        int pos = fileName.lastIndexOf('.');
-        return pos > 0 ? fileName.substring(0, pos) : fileName;
-    }
-
-    private static class BordereauDto {
-
-        private Long id;
-        private Boolean cancelled;
-        private Boolean rebilled;
-
-        BordereauDto(Long id, Boolean cancelled, Boolean rebilled) {
-            this.id = id;
-            this.cancelled = cancelled;
-            this.rebilled = rebilled;
-        }
-
-        public Long getId() {
-            return id;
-        }
-
-        public Boolean getCancelled() {
-            return cancelled;
-        }
-
-        public Boolean getRebilled() {
-            return rebilled;
-        }
-    }
-
-    private static class ReportDto {
-
-        private int nbOK;
-        private int nbKO;
-        private int nbWARN;
-
-        private final StringBuilder reportBuilder = new StringBuilder();
-
-        public int getNbOK() {
-            return nbOK;
-        }
-
-        public int getNbKO() {
-            return nbKO;
-        }
-
-        public int getNbWARN() {
-            return nbWARN;
-        }
-
-        public String getReportMessage() {
-            return reportBuilder.toString();
-        }
-
-        public void addNbOK() {
-            this.nbOK++;
-        }
-
-        public void addNbKO() {
-            this.nbKO++;
-        }
-
-        public void addNbWARN() {
-            this.nbWARN++;
-        }
-
-        public void addNbWARN(int count) {
-            this.nbWARN += count;
-        }
-
-        public void addReport(String message) {
-            if (reportBuilder.length() > 0) {
-                reportBuilder.append(System.lineSeparator());
-            }
-
-            reportBuilder.append(message);
-        }
+    try {
+        return Long.valueOf(otId.trim());
+    } catch (NumberFormatException e) {
+        throw new BusinessException("Identifiant opération traitement invalide : " + otId);
     }
 }
 
+private void updateCdrAsAbandoned(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "UPDATE maco_d_cdr " +
+            "SET status = 'ABANDONED' " +
+            "WHERE status = 'SENT' " +
+            "AND parameter_5 = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void deleteBillableConsumption(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "DELETE FROM maco_d_billable_consumption " +
+            "WHERE id_operation_traitement = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void updatePodMaco(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "UPDATE maco_d_pod_maco " +
+            "SET billing_method_changed = true, " +
+            "    echu_oper = true " +
+            "WHERE id IN ( " +
+            "    SELECT id " +
+            "    FROM ( " +
+            "        SELECT id, ext_id, validity_end_date, " +
+            "               RANK() OVER (PARTITION BY ext_id ORDER BY validity_end_date DESC) AS rownum " +
+            "        FROM maco_d_pod_maco " +
+            "    ) AS last_validity_sq " +
+            "    WHERE rownum = 1 " +
+            "    AND ext_id IN ( " +
+            "        SELECT DISTINCT prm_id " +
+            "        FROM maco_d_processing_operation " +
+            "        WHERE id IN ( " +
+            "            SELECT DISTINCT echoir.id_operation_traitement " +
+            "            FROM maco_d_billable_subscription echoir " +
+            "            JOIN maco_d_billable_subscription echu " +
+            "              ON echoir.id_operation_traitement = echu.id_operation_traitement " +
+            "            WHERE echoir.type_abo = 'A_ECHOIR' " +
+            "            AND echu.type_abo = 'ECHU' " +
+            "            AND echoir.id_operation_traitement = :operationTraitementId " +
+            "            AND echu.id_operation_traitement = :operationTraitementId " +
+            "        ) " +
+            "    ) " +
+            ")",
+            operationTraitementId
+    );
+}
+
+private void deleteBillableSubscription(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "DELETE FROM maco_d_billable_subscription " +
+            "WHERE id_operation_traitement = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void deleteBillableFee(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "DELETE FROM maco_d_billable_fee " +
+            "WHERE id_operation_traitement = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+@SuppressWarnings("unchecked")
+private void updatePreviousConsumptionIfNeeded(EntityManager em, Long operationTraitementId) {
+    String query =
+            "SELECT target.id, COUNT(target.prm_id) " +
+            "FROM maco_d_processing_operation orig " +
+            "JOIN maco_d_processing_operation target " +
+            "  ON orig.prm_id = target.prm_id " +
+            " AND target.status_code = 'TREATED' " +
+            " AND target.operation_type IN ('PLANIFIEE', 'MES') " +
+            " AND (DATE(orig.start_date) - 1 = DATE(target.end_date) " +
+            "      OR DATE(orig.start_date) = DATE(target.end_date)) " +
+            "WHERE orig.id = :operationTraitementId " +
+            "GROUP BY target.id, target.prm_id";
+
+    List<Object[]> rows = em.createNativeQuery(query)
+            .setParameter("operationTraitementId", operationTraitementId)
+            .getResultList();
+
+    List<Long> idsToUpdate = rows.stream()
+            .filter(row -> BigInteger.ONE.equals(row[1]))
+            .map(row -> ((BigInteger) row[0]).longValue())
+            .collect(Collectors.toList());
+
+    if (CollectionUtils.isEmpty(idsToUpdate)) {
+        return;
+    }
+
+    executeUpdate(em,
+            "UPDATE maco_d_billable_consumption " +
+            "SET status_code = 'NOT_DEDUCTED' " +
+            "WHERE id_operation_traitement IN (" + StringUtils.join(idsToUpdate, ",") + ") " +
+            "AND status_code = 'DEDUCTED'"
+    );
+}
+
+private void updateMeterReadingHeader(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "UPDATE maco_d_meter_reading_header " +
+            "SET id_operation_traitement = CASE " +
+            "        WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES') THEN NULL " +
+            "        ELSE id_operation_traitement " +
+            "    END, " +
+            "    status_code = 'TO_TREAT' " +
+            "FROM maco_d_processing_operation " +
+            "WHERE id_operation_traitement = maco_d_processing_operation.id " +
+            "AND id_operation_traitement = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void updateDailyMeterReadingHeader(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "UPDATE maco_d_daily_meter_ready_header " +
+            "SET id_operation_traitement = CASE " +
+            "        WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES') THEN NULL " +
+            "        ELSE id_operation_traitement " +
+            "    END " +
+            "FROM maco_d_processing_operation " +
+            "WHERE id_operation_traitement = maco_d_processing_operation.id " +
+            "AND id_operation_traitement = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void updateProcessingOperationAsToTreat(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "UPDATE maco_d_processing_operation " +
+            "SET status_code = 'TO_TREAT' " +
+            "WHERE id = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void updateFeeAsToTreat(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "UPDATE maco_d_fee " +
+            "SET id_operation_traitement = CASE " +
+            "        WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES', 'FRAIS_SEUL') THEN NULL " +
+            "        ELSE maco_d_fee.id_operation_traitement " +
+            "    END, " +
+            "    operation_start_date = CASE " +
+            "        WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES', 'FRAIS_SEUL') THEN NULL " +
+            "        ELSE maco_d_fee.operation_start_date " +
+            "    END, " +
+            "    operation_end_date = CASE " +
+            "        WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES', 'FRAIS_SEUL') THEN NULL " +
+            "        ELSE maco_d_fee.operation_end_date " +
+            "    END, " +
+            "    operation_type = CASE " +
+            "        WHEN maco_d_processing_operation.operation_type NOT IN ('MES', 'RES', 'FRAIS_SEUL') THEN NULL " +
+            "        ELSE maco_d_fee.operation_type " +
+            "    END, " +
+            "    status_code = 'TO_TREAT' " +
+            "FROM maco_d_processing_operation " +
+            "WHERE id_operation_traitement = maco_d_processing_operation.id " +
+            "AND id_operation_traitement = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void deleteCustomTableOperationTraitement(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "DELETE FROM ct_operation_traitement " +
+            "WHERE id_operation_traitement = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void deleteCustomTableLignesFacturables(EntityManager em, Long operationTraitementId) {
+    executeUpdate(em,
+            "DELETE FROM ct_lignes_facturables " +
+            "WHERE parameter_5 = :operationTraitementId",
+            operationTraitementId
+    );
+}
+
+private void executeUpdate(EntityManager em, String query, Long operationTraitementId) {
+    em.createNativeQuery(query)
+            .setParameter("operationTraitementId", operationTraitementId)
+            .executeUpdate();
+    em.flush();
+}
+
+private void executeUpdate(EntityManager em, String query) {
+    em.createNativeQuery(query).executeUpdate();
+    em.flush();
+}
