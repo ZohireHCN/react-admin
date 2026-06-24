@@ -1,2 +1,1 @@
-Je suis en train de faire des modifications sur les APIs ProGetBordereauxByContactAndAccessLevel [COL-19122], ProGetInvoicesByBordereauAndAccessLevel [COL-19122] et ProGetInvoicesByContactAndAccessLevel [COL-19122].
-Est-ce que tu aurais, s’il te plaît, des JDD en recette PRO pour que je puisse les tester 
+tryCancelLitigationIfAllowed(initialInvoiceAo, report);
