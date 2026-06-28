@@ -1,0 +1,88 @@
+{
+    "info": {
+        "_postman_id": "065bc485-3ce4-4ccf-b5bf-7f5efbdaaa87",
+        "name": "Opencell Scripts",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+        {
+            "name": "Scripts",
+            "item": [
+                "---startScript---"
+                {
+                    "name": "Script <---simpleScriptClassName--->",
+                    "event": [
+                        {
+                            "listen": "test",
+                            "script": {
+                                "id": "7a641fcb-9f4a-4fc5-83aa-4f0f7da36fb0",
+                                "exec": [
+                                    "var data = JSON.parse(responseBody);",
+                                    "tests[\"is.success\"] = data.actionStatus.status === \"SUCCESS\";"
+                                ],
+                                "type": "text/javascript"
+                            }
+                        }
+                    ],
+                    "request": {
+                        "auth": {
+                            "type": "basic",
+                            "basic": [
+                                {
+                                    "key": "username",
+                                    "value": "{{opencell.username}}",
+                                    "type": "string"
+                                },
+                                {
+                                    "key": "password",
+                                    "value": "{{opencell.password}}",
+                                    "type": "string"
+                                },
+                                {
+                                    "key": "saveHelperData",
+                                    "value": true,
+                                    "type": "boolean"
+                                },
+                                {
+                                    "key": "showPassword",
+                                    "value": false,
+                                    "type": "boolean"
+                                }
+                            ]
+                        },
+                        "method": "POST",
+                        "header": [
+                            {
+                                "key": "Content-Type",
+                                "name": "Content-Type",
+                                "value": "application/xml",
+                                "type": "text"
+                            },
+                            {
+                                "key": "Authorization",
+                                "value": "Basic b3BlbmNlbGwuYWRtaW46b3BlbmNlbGwuYWRtaW4="
+                            }
+                        ],
+                        "body": {
+                            "mode": "raw",
+                            "raw": "<ScriptInstance code=\"<---scriptClassName--->\" description=\"<---simpleScriptClassName--->\">\n    <type>JAVA</type>\n    <reuse>true</reuse>\n    <script><![CDATA[<---scriptContent--->]]></script>\r\n</ScriptInstance>"
+                            
+                        },
+                        "url": {
+                            "raw": "{{opencell.url}}/scriptInstance/createOrUpdate",
+                            "host": [
+                                "{{opencell.url}}"
+                            ],
+                            "path": [
+                                "scriptInstance",
+                                "createOrUpdate"
+                            ]
+                        }
+                    },
+                    "response": []
+                }
+                "---endScript---"
+            ]
+        }
+    ]
+}
