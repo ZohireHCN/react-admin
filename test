@@ -1,150 +1,112 @@
-Tu es à une étape importante. Je ne chercherais pas à ajouter des fonctionnalités tant que create-postman n’est pas parfaitement fiable.
+Voici une version corrigée qui supprime vraiment les doublons, normalise les chemins Windows/Linux, et utilise git diff au lieu de git log.
 
-Je te conseille cet ordre.
+package com.alpiq.maven.plugin.git;
 
-1. Corriger les doublons (priorité n°1)
+import org.apache.maven.plugin.logging.Log;
 
-Si tu utilises quelque chose comme :
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
-List<String> files = new ArrayList<>();
+public class GitChangedFilesService {
 
-remplace-le par :
+    private final Log log;
 
-Set<String> files = new LinkedHashSet<>();
+    public GitChangedFilesService(Log log) {
+        this.log = log;
+    }
 
-ou
+    public List<Path> findModifiedJavaFiles(File repoDir, int modifiedLastDays, File inputDir) {
+        try {
+            Path repositoryPath = repoDir.toPath().toAbsolutePath().normalize();
+            Path inputPath = inputDir.toPath().toAbsolutePath().normalize();
 
-Set<Path> files = new LinkedHashSet<>();
+            String relativeInputPath = repositoryPath.relativize(inputPath)
+                    .toString()
+                    .replace("\\", "/");
 
-À la fin :
+            ProcessBuilder processBuilder = new ProcessBuilder(
+                    "git",
+                    "diff",
+                    "--name-only",
+                    "HEAD@{" + modifiedLastDays + ".days.ago}",
+                    "HEAD",
+                    "--",
+                    relativeInputPath
+            );
 
-return new ArrayList<>(files);
+            processBuilder.directory(repositoryPath.toFile());
+            processBuilder.redirectErrorStream(true);
 
-Tu n’auras plus de doublons.
+            Process process = processBuilder.start();
 
-⸻
+            Map<String, Path> uniqueFiles = new LinkedHashMap<>();
 
-2. Vérifier que Git renvoie bien ce que tu veux
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()))) {
 
-Avant de lancer Maven, exécute dans le terminal :
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    String gitPath = line.trim();
 
-git log --since="20 days ago" --name-only --pretty=format:
+                    if (gitPath.isEmpty()) {
+                        continue;
+                    }
 
-Si tu vois déjà des doublons, c’est normal : git log liste les fichiers pour chaque commit.
+                    if (!gitPath.endsWith(".java")) {
+                        continue;
+                    }
 
-Par exemple :
+                    Path absoluteFile = repositoryPath.resolve(gitPath)
+                            .toAbsolutePath()
+                            .normalize();
 
-commit A
-A.java
-B.java
+                    if (!Files.exists(absoluteFile)) {
+                        continue;
+                    }
 
-commit B
-A.java
-C.java
+                    String uniqueKey = absoluteFile.toString()
+                            .replace("\\", "/")
+                            .toLowerCase();
 
-Git renvoie :
+                    uniqueFiles.putIfAbsent(uniqueKey, absoluteFile);
+                }
+            }
 
-A.java
-B.java
-A.java
-C.java
+            int exitCode = process.waitFor();
 
-Donc il faut dédupliquer.
+            if (exitCode != 0) {
+                throw new IllegalStateException(
+                        "Git command failed with exit code " + exitCode
+                );
+            }
 
-⸻
+            log.info("Modified Java files found by Git: " + uniqueFiles.size());
 
-3. Je changerais même la commande Git
+            return new ArrayList<>(uniqueFiles.values());
 
-Au lieu de :
-
-git log --since="20 days ago"
-
-je passerais à :
-
-git diff --name-only HEAD@{20.days.ago} HEAD
-
-Tu obtiens directement :
-
-A.java
-B.java
-C.java
-
-sans doublons.
-
-⸻
-
-4. Filtrer uniquement les vrais scripts
-
-Tu affiches actuellement :
-
-CurvesExportApiScript.java
-InvoiceScript.java
-...
-
-Le plugin devrait ignorer :
-	•	DTO
-	•	Entity
-	•	Service
-	•	Repository
-	•	Test
-	•	Configuration
-
-et ne garder que les classes correspondant à tes scripts REST.
-
-Par exemple :
-
-if (!fileName.endsWith("Script.java")) {
-    continue;
+        } catch (Exception e) {
+            throw new IllegalStateException(
+                    "Unable to detect modified Java files using Git", e
+            );
+        }
+    }
 }
 
-ou encore mieux, vérifier la présence de ton annotation spécifique (par exemple @Script ou @Path selon votre architecture).
+Appel côté CreatePostmanMojo :
 
-⸻
+List<Path> javaFiles = gitChangedFilesService.findModifiedJavaFiles(
+        scriptsModulePath,
+        modifiedLastDays,
+        inputDir
+);
 
-5. Ajouter un résumé
+Commande attendue :
 
-À la fin de create-postman, affiche quelque chose comme :
-
-==================================================
-ALPIQ CREATE POSTMAN
-==================================================
-
-Git filter        : 20 days
-Repository        : C:\workspace\alpiq
-
-Java files found  : 87
-REST scripts      : 42
-Collections       : 1
-
-Generated file
-
-target/generated-postman/alpiq-scripts/alpiq-scripts.json
-
-Elapsed : 2.3 s
-==================================================
-
-Ça aide énormément à diagnostiquer les problèmes.
-
-⸻
-
-Mon conseil pour la suite
-
-Je pense que tu devrais stabiliser le plugin en trois étapes :
-
-Sprint 1 (maintenant)
-	•	✅ supprimer les doublons Git
-	•	✅ rendre tous les chemins configurables dans le pom.xml
-	•	✅ afficher un résumé d’exécution
-
-Sprint 2
-	•	fusion des Postman (BOTH + B2B / B2C)
-	•	fusion des SQL
-	•	build-release
-
-Sprint 3
-	•	validation de la release (validate-release)
-	•	vérification des numéros SQL
-	•	vérification de la structure
-	•	ZIP final
-
-À mon avis, si tu suis ce plan, tu auras un plugin très robuste et facile à maintenir.
+mvn alpiq:create-postman -DmodifiedLastDays=20
