@@ -1,112 +1,143 @@
-Voici une version corrigée qui supprime vraiment les doublons, normalise les chemins Windows/Linux, et utilise git diff au lieu de git log.
+package com.alpiq.maven.plugin.service;
 
-package com.alpiq.maven.plugin.git;
-
+import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.logging.Log;
 
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.InputStreamReader;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.util.*;
+import java.util.concurrent.TimeUnit;
 
+/**
+ * Finds files changed in Git. This is intentionally based on Git history instead
+ * of File.lastModified(), because checkout/clone/CI can change filesystem dates.
+ */
 public class GitChangedFilesService {
-
     private final Log log;
 
     public GitChangedFilesService(Log log) {
         this.log = log;
     }
 
-    public List<Path> findModifiedJavaFiles(File repoDir, int modifiedLastDays, File inputDir) {
+    public Set<File> findChangedJavaFiles(File gitWorkingDirectory,
+                                          File inputDir,
+                                          Integer modifiedLastDays,
+                                          String gitSinceTag,
+                                          String gitSinceBranch,
+                                          boolean showFiles) throws MojoExecutionException {
+        File workDir = normalizeDirectory(gitWorkingDirectory);
+        File repoRoot = findRepositoryRoot(workDir);
+        File normalizedInputDir = inputDir.getAbsoluteFile();
+
+        List<String> relativePaths;
+        if (notBlank(gitSinceTag)) {
+            relativePaths = runGit(repoRoot, "diff", "--name-only", gitSinceTag.trim() + "...HEAD", "--");
+            log.info("Git filter enabled: files changed since tag/reference '" + gitSinceTag.trim() + "'.");
+        } else if (notBlank(gitSinceBranch)) {
+            relativePaths = runGit(repoRoot, "diff", "--name-only", gitSinceBranch.trim() + "...HEAD", "--");
+            log.info("Git filter enabled: files changed since branch/reference '" + gitSinceBranch.trim() + "'.");
+        } else if (modifiedLastDays != null && modifiedLastDays > 0) {
+            relativePaths = runGit(repoRoot, "log", "--since=" + modifiedLastDays + " days ago", "--name-only", "--pretty=format:", "--");
+            log.info("Git filter enabled: files changed in the last " + modifiedLastDays + " day(s).");
+        } else {
+            return new HashSet<File>();
+        }
+
+        Set<File> result = new LinkedHashSet<File>();
+        for (String relativePath : relativePaths) {
+            String cleaned = relativePath == null ? "" : relativePath.trim();
+            if (cleaned.isEmpty() || !cleaned.endsWith(".java")) {
+                continue;
+            }
+            File file = new File(repoRoot, cleaned).getAbsoluteFile();
+            if (!file.isFile()) {
+                continue;
+            }
+            if (isInside(file, normalizedInputDir)) {
+                if(showFiles) log.info(file.getAbsolutePath());
+                result.add(file);
+            }
+        }
+        return new HashSet<File>(result);
+    }
+
+    public boolean isGitFilterConfigured(Integer modifiedLastDays, String gitSinceTag, String gitSinceBranch) {
+        return (modifiedLastDays != null && modifiedLastDays > 0) || notBlank(gitSinceTag) || notBlank(gitSinceBranch);
+    }
+
+    private File normalizeDirectory(File directory) throws MojoExecutionException {
+        if (directory == null) {
+            throw new MojoExecutionException("scriptsModulePath is null");
+        }
+        File dir = directory.getAbsoluteFile();
+        if (!dir.exists() || !dir.isDirectory()) {
+            throw new MojoExecutionException("scriptsModulePath does not exist or is not a directory: " + dir);
+        }
+        return dir;
+    }
+
+    private File findRepositoryRoot(File workDir) throws MojoExecutionException {
+        List<String> output = runGit(workDir, "rev-parse", "--show-toplevel");
+        if (output.isEmpty() || output.get(0).trim().isEmpty()) {
+            throw new MojoExecutionException("Unable to detect Git repository root from: " + workDir);
+        }
+        return new File(output.get(0).trim()).getAbsoluteFile();
+    }
+
+    private List<String> runGit(File workDir, String... args) throws MojoExecutionException {
+        List<String> command = new ArrayList<String>();
+        command.add("git");
+        for (String arg : args) {
+            command.add(arg);
+        }
         try {
-            Path repositoryPath = repoDir.toPath().toAbsolutePath().normalize();
-            Path inputPath = inputDir.toPath().toAbsolutePath().normalize();
-
-            String relativeInputPath = repositoryPath.relativize(inputPath)
-                    .toString()
-                    .replace("\\", "/");
-
-            ProcessBuilder processBuilder = new ProcessBuilder(
-                    "git",
-                    "diff",
-                    "--name-only",
-                    "HEAD@{" + modifiedLastDays + ".days.ago}",
-                    "HEAD",
-                    "--",
-                    relativeInputPath
-            );
-
-            processBuilder.directory(repositoryPath.toFile());
-            processBuilder.redirectErrorStream(true);
-
-            Process process = processBuilder.start();
-
-            Map<String, Path> uniqueFiles = new LinkedHashMap<>();
-
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream()))) {
-
-                String line;
-                while ((line = reader.readLine()) != null) {
-                    String gitPath = line.trim();
-
-                    if (gitPath.isEmpty()) {
-                        continue;
-                    }
-
-                    if (!gitPath.endsWith(".java")) {
-                        continue;
-                    }
-
-                    Path absoluteFile = repositoryPath.resolve(gitPath)
-                            .toAbsolutePath()
-                            .normalize();
-
-                    if (!Files.exists(absoluteFile)) {
-                        continue;
-                    }
-
-                    String uniqueKey = absoluteFile.toString()
-                            .replace("\\", "/")
-                            .toLowerCase();
-
-                    uniqueFiles.putIfAbsent(uniqueKey, absoluteFile);
-                }
+            ProcessBuilder builder = new ProcessBuilder(command);
+            builder.directory(workDir);
+            builder.redirectErrorStream(true);
+            Process process = builder.start();
+            List<String> lines = new ArrayList<String>();
+            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                lines.add(line);
             }
-
-            int exitCode = process.waitFor();
-
-            if (exitCode != 0) {
-                throw new IllegalStateException(
-                        "Git command failed with exit code " + exitCode
-                );
+            boolean finished = process.waitFor(60, TimeUnit.SECONDS);
+            if (!finished) {
+                process.destroyForcibly();
+                throw new MojoExecutionException("Git command timed out: " + command);
             }
-
-            log.info("Modified Java files found by Git: " + uniqueFiles.size());
-
-            return new ArrayList<>(uniqueFiles.values());
-
+            if (process.exitValue() != 0) {
+                throw new MojoExecutionException("Git command failed: " + command + "\n" + join(lines));
+            }
+            return lines;
+        } catch (MojoExecutionException e) {
+            throw e;
         } catch (Exception e) {
-            throw new IllegalStateException(
-                    "Unable to detect modified Java files using Git", e
-            );
+            throw new MojoExecutionException("Failed to execute Git command: " + command, e);
         }
     }
+
+    private boolean isInside(File file, File directory) throws MojoExecutionException {
+        try {
+            String filePath = file.getCanonicalPath();
+            String dirPath = directory.getCanonicalPath();
+            return filePath.equals(dirPath) || filePath.startsWith(dirPath + File.separator);
+        } catch (Exception e) {
+            throw new MojoExecutionException("Failed to compare paths: " + file + " / " + directory, e);
+        }
+    }
+
+    private static boolean notBlank(String value) {
+        return value != null && !value.trim().isEmpty();
+    }
+
+    private static String join(List<String> lines) {
+        StringBuilder builder = new StringBuilder();
+        for (String line : lines) {
+            builder.append(line).append(System.lineSeparator());
+        }
+        return builder.toString();
+    }
 }
-
-Appel côté CreatePostmanMojo :
-
-List<Path> javaFiles = gitChangedFilesService.findModifiedJavaFiles(
-        scriptsModulePath,
-        modifiedLastDays,
-        inputDir
-);
-
-Commande attendue :
-
-mvn alpiq:create-postman -DmodifiedLastDays=20
