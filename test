@@ -1,3 +1,9 @@
+Le problème est ici :
+
+return new HashSet<File>(result);
+
+Tu perds l’ordre, et selon les chemins/canonical paths tu peux encore avoir des doublons visibles. Remplace ta classe par cette version : elle déduplique avec une clé canonique normalisée.
+
 package com.alpiq.maven.plugin.service;
 
 import org.apache.maven.plugin.MojoExecutionException;
@@ -10,10 +16,6 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-/**
- * Finds files changed in Git. This is intentionally based on Git history instead
- * of File.lastModified(), because checkout/clone/CI can change filesystem dates.
- */
 public class GitChangedFilesService {
     private final Log log;
 
@@ -27,11 +29,13 @@ public class GitChangedFilesService {
                                           String gitSinceTag,
                                           String gitSinceBranch,
                                           boolean showFiles) throws MojoExecutionException {
+
         File workDir = normalizeDirectory(gitWorkingDirectory);
         File repoRoot = findRepositoryRoot(workDir);
         File normalizedInputDir = inputDir.getAbsoluteFile();
 
         List<String> relativePaths;
+
         if (notBlank(gitSinceTag)) {
             relativePaths = runGit(repoRoot, "diff", "--name-only", gitSinceTag.trim() + "...HEAD", "--");
             log.info("Git filter enabled: files changed since tag/reference '" + gitSinceTag.trim() + "'.");
@@ -39,28 +43,45 @@ public class GitChangedFilesService {
             relativePaths = runGit(repoRoot, "diff", "--name-only", gitSinceBranch.trim() + "...HEAD", "--");
             log.info("Git filter enabled: files changed since branch/reference '" + gitSinceBranch.trim() + "'.");
         } else if (modifiedLastDays != null && modifiedLastDays > 0) {
-            relativePaths = runGit(repoRoot, "log", "--since=" + modifiedLastDays + " days ago", "--name-only", "--pretty=format:", "--");
+            relativePaths = runGit(repoRoot, "diff", "--name-only",
+                    "HEAD@{" + modifiedLastDays + ".days.ago}", "HEAD", "--");
             log.info("Git filter enabled: files changed in the last " + modifiedLastDays + " day(s).");
         } else {
-            return new HashSet<File>();
+            return new LinkedHashSet<File>();
         }
 
-        Set<File> result = new LinkedHashSet<File>();
+        Map<String, File> uniqueFiles = new LinkedHashMap<String, File>();
+
         for (String relativePath : relativePaths) {
             String cleaned = relativePath == null ? "" : relativePath.trim();
+
             if (cleaned.isEmpty() || !cleaned.endsWith(".java")) {
                 continue;
             }
+
             File file = new File(repoRoot, cleaned).getAbsoluteFile();
+
             if (!file.isFile()) {
                 continue;
             }
-            if (isInside(file, normalizedInputDir)) {
-                if(showFiles) log.info(file.getAbsolutePath());
-                result.add(file);
+
+            if (!isInside(file, normalizedInputDir)) {
+                continue;
+            }
+
+            String key = canonicalKey(file);
+            uniqueFiles.putIfAbsent(key, file.getCanonicalFile());
+        }
+
+        if (showFiles) {
+            for (File file : uniqueFiles.values()) {
+                log.info(file.getAbsolutePath());
             }
         }
-        return new HashSet<File>(result);
+
+        log.info("Git modified Java files after deduplication: " + uniqueFiles.size());
+
+        return new LinkedHashSet<File>(uniqueFiles.values());
     }
 
     public boolean isGitFilterConfigured(Integer modifiedLastDays, String gitSinceTag, String gitSinceBranch) {
@@ -89,28 +110,34 @@ public class GitChangedFilesService {
     private List<String> runGit(File workDir, String... args) throws MojoExecutionException {
         List<String> command = new ArrayList<String>();
         command.add("git");
-        for (String arg : args) {
-            command.add(arg);
-        }
+        Collections.addAll(command, args);
+
         try {
             ProcessBuilder builder = new ProcessBuilder(command);
             builder.directory(workDir);
             builder.redirectErrorStream(true);
+
             Process process = builder.start();
             List<String> lines = new ArrayList<String>();
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
-            String line;
-            while ((line = reader.readLine()) != null) {
-                lines.add(line);
+
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    lines.add(line);
+                }
             }
+
             boolean finished = process.waitFor(60, TimeUnit.SECONDS);
             if (!finished) {
                 process.destroyForcibly();
                 throw new MojoExecutionException("Git command timed out: " + command);
             }
+
             if (process.exitValue() != 0) {
                 throw new MojoExecutionException("Git command failed: " + command + "\n" + join(lines));
             }
+
             return lines;
         } catch (MojoExecutionException e) {
             throw e;
@@ -129,6 +156,16 @@ public class GitChangedFilesService {
         }
     }
 
+    private String canonicalKey(File file) throws MojoExecutionException {
+        try {
+            return file.getCanonicalPath()
+                    .replace("\\", "/")
+                    .toLowerCase(Locale.ROOT);
+        } catch (Exception e) {
+            throw new MojoExecutionException("Failed to normalize file path: " + file, e);
+        }
+    }
+
     private static boolean notBlank(String value) {
         return value != null && !value.trim().isEmpty();
     }
@@ -141,3 +178,5 @@ public class GitChangedFilesService {
         return builder.toString();
     }
 }
+
+Point important : j’ai remplacé git log --name-only par git diff --name-only, puis je déduplique avec LinkedHashMap.
