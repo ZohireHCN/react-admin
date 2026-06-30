@@ -1,4 +1,1 @@
-On en a profité pour tester s’il y avait une coupure de l’IHM Admin lors de la MEP. Elle bascule bien entre les deux instances. On constate simplement un léger temps de latence sur l’instance 1 lorsque l’instance 0 est indisponible
 
-
-double check effectuée, tous les etapes sont ok
