@@ -1,1 +1,35 @@
-Pour le deuxième test, lors de la MEP B2B, le comportement a été un peu différent. Nous avons eu un Bad Gateway avant le basculement automatique vers l’instance 0 lorsque l’instance 1 est indisponible. Nous avons également constaté les mêmes lenteurs sur l’IHM Admin et le CC
+Le problème vient de HEAD@{30.days.ago} : ce n’est pas fiable pour ton besoin. C’est basé sur le reflog local, pas sur l’historique réel des commits.
+
+Donc selon ton poste, checkout, pull, merge, rebase, CI, ça peut remonter n’importe quoi.
+
+Utilise plutôt git log --since.
+
+Commande correcte :
+
+git log --since="30 days ago" --name-only --pretty=format: --diff-filter=AM -- src/main/java
+
+Puis dans Java :
+	•	lire les lignes
+	•	garder seulement .java
+	•	dédupliquer avec LinkedHashMap
+	•	filtrer dans inputDir
+
+À remplacer dans ton service :
+
+relativePaths = runGit(
+    repoRoot,
+    "log",
+    "--since=" + modifiedLastDays + " days ago",
+    "--name-only",
+    "--pretty=format:",
+    "--diff-filter=AM",
+    "--",
+    relativeInputDir
+);
+
+Donc :
+	•	supprime git diff HEAD@{X.days.ago}
+	•	supprime lastModified
+	•	garde uniquement git log --since.
+
+modifiedLastDays=30 = commits des 30 derniers jours.
