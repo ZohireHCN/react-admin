@@ -1,35 +1,134 @@
-Le problème vient de HEAD@{30.days.ago} : ce n’est pas fiable pour ton besoin. C’est basé sur le reflog local, pas sur l’historique réel des commits.
+Oui. Je te conseille de combiner les deux commandes Git :
+	1.	Les fichiers commités récemment (git log --since).
+	2.	Les fichiers locaux modifiés/non commités (git status --porcelain).
 
-Donc selon ton poste, checkout, pull, merge, rebase, CI, ça peut remonter n’importe quoi.
+Ainsi, ton plugin fonctionnera aussi bien en développement que sur une branche de release.
 
-Utilise plutôt git log --since.
+1. Remplace cette partie
 
-Commande correcte :
+} else if (modifiedLastDays != null && modifiedLastDays > 0) {
+    relativePaths = runGit(
+        repoRoot,
+        "log",
+        "--since=" + modifiedLastDays + " days ago",
+        "--name-only",
+        "--pretty=format:",
+        "--diff-filter=AM",
+        "--"
+    );
 
-git log --since="30 days ago" --name-only --pretty=format: --diff-filter=AM -- src/main/java
+    log.info("Git filter enabled: files changed in the last "
+            + modifiedLastDays + " day(s).");
+}
 
-Puis dans Java :
-	•	lire les lignes
-	•	garder seulement .java
-	•	dédupliquer avec LinkedHashMap
-	•	filtrer dans inputDir
+par :
 
-À remplacer dans ton service :
+} else if (modifiedLastDays != null && modifiedLastDays > 0) {
 
-relativePaths = runGit(
-    repoRoot,
-    "log",
-    "--since=" + modifiedLastDays + " days ago",
-    "--name-only",
-    "--pretty=format:",
-    "--diff-filter=AM",
-    "--",
-    relativeInputDir
-);
+    LinkedHashSet<String> changedFiles = new LinkedHashSet<>();
 
-Donc :
-	•	supprime git diff HEAD@{X.days.ago}
-	•	supprime lastModified
-	•	garde uniquement git log --since.
+    // 1. Fichiers commités récemment
+    changedFiles.addAll(runGit(
+            repoRoot,
+            "log",
+            "--since=" + modifiedLastDays + " days ago",
+            "--name-only",
+            "--pretty=format:",
+            "--diff-filter=AM",
+            "--"
+    ));
 
-modifiedLastDays=30 = commits des 30 derniers jours.
+    // 2. Fichiers locaux (non commités)
+    List<String> status = runGit(
+            repoRoot,
+            "status",
+            "--porcelain"
+    );
+
+    for (String line : status) {
+
+        if (line.length() < 4) {
+            continue;
+        }
+
+        String path = line.substring(3).trim();
+
+        if (!path.endsWith(".java")) {
+            continue;
+        }
+
+        changedFiles.add(path);
+    }
+
+    relativePaths = new ArrayList<>(changedFiles);
+
+    log.info("Git filter enabled: files changed in the last "
+            + modifiedLastDays + " day(s) + local modifications.");
+}
+
+
+⸻
+
+2. Ensuite, garde ton traitement actuel
+
+Map<String, File> uniqueFiles = new LinkedHashMap<>();
+
+for (String relativePath : relativePaths) {
+
+    String cleaned = relativePath.trim();
+
+    if (cleaned.isEmpty() || !cleaned.endsWith(".java")) {
+        continue;
+    }
+
+    File file = new File(repoRoot, cleaned).getCanonicalFile();
+
+    if (!file.exists()) {
+        continue;
+    }
+
+    if (!isInside(file, normalizedInputDir)) {
+        continue;
+    }
+
+    uniqueFiles.put(file.getCanonicalPath(), file);
+}
+
+Puis :
+
+return new LinkedHashSet<>(uniqueFiles.values());
+
+
+⸻
+
+Le comportement sera alors :
+
+Si tu fais :
+
+mvn alpiq:create-postman -DmodifiedLastDays=30
+
+Le plugin prendra automatiquement :
+
+✅ les scripts Java commités dans les 30 derniers jours ;
+
+✅ les scripts Java modifiés localement mais non commités ;
+
+✅ les nouveaux scripts Java (git status → ??) ;
+
+❌ les scripts supprimés (D) seront ignorés.
+
+⸻
+
+Une dernière amélioration
+
+Je te conseille de filtrer les statuts Git pour ne garder que ceux qui t’intéressent :
+
+String statusCode = line.substring(0, 2).trim();
+
+if (!(statusCode.startsWith("M")
+        || statusCode.startsWith("A")
+        || statusCode.equals("??"))) {
+    continue;
+}
+
+Ainsi, tu ignores les suppressions (D), les renommages (R) ou autres états qui ne doivent pas déclencher la génération de alpiq-scripts.json. C’est la version que je mettrais en production.
