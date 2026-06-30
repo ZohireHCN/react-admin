@@ -1,4 +1,5 @@
-Suite au MEP aujourd'hui, je propose quelques améliorations pour les prochaines releases :
-	•	Ajout d’un dossier postman-struct (Custom Tables, Custom Fields,.. ) et postman-jobs (Jobs, Notification,.. ) pour regrouper les collections Postman liées aux APIs techniques OpenCell.
-	•	Utiliser systématiquement les APIs standard OpenCell pour créer ou modifier les Custom Tables et Custom Fields.
-Je vais deplacer le dossier 26.06.0 dans old-releases et creer les dossiers pour les prochaines releases avec le bon nommage.
+Suite à la MEP d’aujourd’hui, je propose les améliorations suivantes pour les prochaines releases :
+	•	Ajout des dossiers postman-struct (Custom Tables, Custom Fields, etc.) et postman-jobs (Jobs, Notifications, etc.) pour les APIs techniques OpenCell.
+	•	Utiliser les APIs standard OpenCell pour toute création ou modification des Custom Tables et Custom Fields.
+
+Je vais également déplacer le dossier 26.06.0 dans old-releases et créer le template pour les prochaines releases avec le nouveau nommage
