@@ -1,134 +1,369 @@
-Oui. Je te conseille de combiner les deux commandes Git :
-	1.	Les fichiers commités récemment (git log --since).
-	2.	Les fichiers locaux modifiés/non commités (git status --porcelain).
+# Alpiq Release Maven Plugin
 
-Ainsi, ton plugin fonctionnera aussi bien en développement que sur une branche de release.
+The **Alpiq Release Maven Plugin** automates the generation of Alpiq deployment artifacts.
 
-1. Remplace cette partie
+It provides two Maven goals:
 
-} else if (modifiedLastDays != null && modifiedLastDays > 0) {
-    relativePaths = runGit(
-        repoRoot,
-        "log",
-        "--since=" + modifiedLastDays + " days ago",
-        "--name-only",
-        "--pretty=format:",
-        "--diff-filter=AM",
-        "--"
-    );
+- **create-postman** : Generate the `alpiq-scripts.json` collection from Java REST APIs.
+- **build-release** : Build a complete B2B/B2C release from the release-notes directory.
 
-    log.info("Git filter enabled: files changed in the last "
-            + modifiedLastDays + " day(s).");
-}
+---
 
-par :
+# Features
 
-} else if (modifiedLastDays != null && modifiedLastDays > 0) {
+## Create Postman
 
-    LinkedHashSet<String> changedFiles = new LinkedHashSet<>();
+Automatically scans Java REST APIs and generates the Postman collection used to deploy Alpiq scripts.
 
-    // 1. Fichiers commités récemment
-    changedFiles.addAll(runGit(
-            repoRoot,
-            "log",
-            "--since=" + modifiedLastDays + " days ago",
-            "--name-only",
-            "--pretty=format:",
-            "--diff-filter=AM",
-            "--"
-    ));
+Generated file:
 
-    // 2. Fichiers locaux (non commités)
-    List<String> status = runGit(
-            repoRoot,
-            "status",
-            "--porcelain"
-    );
+```
+target/generated-postman/
+└── alpiq-scripts/
+    └── alpiq-scripts.json
+```
 
-    for (String line : status) {
+The scan can be:
 
-        if (line.length() < 4) {
-            continue;
-        }
+- complete
+- filtered using Git history
+- include local uncommitted scripts
 
-        String path = line.substring(3).trim();
+---
 
-        if (!path.endsWith(".java")) {
-            continue;
-        }
+## Build Release
 
-        changedFiles.add(path);
-    }
+Builds the release packages for B2B and B2C environments.
 
-    relativePaths = new ArrayList<>(changedFiles);
+The plugin automatically merges:
 
-    log.info("Git filter enabled: files changed in the last "
-            + modifiedLastDays + " day(s) + local modifications.");
-}
+```
+0-both
++
+1-b2c
 
+or
 
-⸻
+0-both
++
+2-b2b
+```
 
-2. Ensuite, garde ton traitement actuel
+and generates the deployment packages.
 
-Map<String, File> uniqueFiles = new LinkedHashMap<>();
+---
 
-for (String relativePath : relativePaths) {
+# Plugin Configuration
 
-    String cleaned = relativePath.trim();
+```xml
+<plugin>
+    <groupId>com.alpiq.maven</groupId>
+    <artifactId>alpiq-release-maven-plugin</artifactId>
+    <version>1.0.0</version>
 
-    if (cleaned.isEmpty() || !cleaned.endsWith(".java")) {
-        continue;
-    }
+    <configuration>
 
-    File file = new File(repoRoot, cleaned).getCanonicalFile();
+        <!-- Java source directory -->
+        <inputDir>${project.basedir}/src/main/java</inputDir>
 
-    if (!file.exists()) {
-        continue;
-    }
+        <!-- Git repository containing Java scripts -->
+        <scriptsModulePath>${project.basedir}</scriptsModulePath>
 
-    if (!isInside(file, normalizedInputDir)) {
-        continue;
-    }
+        <!-- Release notes root directory -->
+        <releaseNotesDir>${project.basedir}/release-notes</releaseNotesDir>
 
-    uniqueFiles.put(file.getCanonicalPath(), file);
-}
+        <!-- Output directory -->
+        <outputDir>${project.build.directory}</outputDir>
 
-Puis :
+        <!-- Scan only modified scripts -->
+        <modifiedLastDays>30</modifiedLastDays>
 
-return new LinkedHashSet<>(uniqueFiles.values());
+        <!-- Include local uncommitted scripts -->
+        <withLocalScript>true</withLocalScript>
 
+    </configuration>
+</plugin>
+```
 
-⸻
+---
 
-Le comportement sera alors :
+# Goal : create-postman
 
-Si tu fais :
+Generate the Postman collection.
 
-mvn alpiq:create-postman -DmodifiedLastDays=30
+```
+mvn alpiq:create-postman
+```
 
-Le plugin prendra automatiquement :
+This command scans every REST API.
 
-✅ les scripts Java commités dans les 30 derniers jours ;
+---
 
-✅ les scripts Java modifiés localement mais non commités ;
+## Generate only modified scripts
 
-✅ les nouveaux scripts Java (git status → ??) ;
+```
+mvn alpiq:create-postman \
+    -DmodifiedLastDays=30
+```
 
-❌ les scripts supprimés (D) seront ignorés.
+The plugin scans only Java files modified during the last 30 days.
 
-⸻
+---
 
-Une dernière amélioration
+## Include local scripts
 
-Je te conseille de filtrer les statuts Git pour ne garder que ceux qui t’intéressent :
+```
+mvn alpiq:create-postman \
+    -DmodifiedLastDays=30 \
+    -DwithLocalScript=true
+```
 
-String statusCode = line.substring(0, 2).trim();
+The plugin scans:
 
-if (!(statusCode.startsWith("M")
-        || statusCode.startsWith("A")
-        || statusCode.equals("??"))) {
-    continue;
-}
+- committed Java files modified during the last 30 days
+- modified local Java files
+- newly created Java files (Git status)
 
-Ainsi, tu ignores les suppressions (D), les renommages (R) ou autres états qui ne doivent pas déclencher la génération de alpiq-scripts.json. C’est la version que je mettrais en production.
+---
+
+# Goal : build-release
+
+```
+mvn alpiq:build-release \
+    -DreleaseVersion=26.06.01
+```
+
+---
+
+# Release Notes Structure
+
+```
+release-notes/
+└──26.06.01/
+    ├──0-both/
+    │   ├──postman-struct/
+    │   ├──postman-jobs/
+    │   ├──sql-struct/
+    │   └──sql-data/
+    │
+    ├──1-b2c/
+    │   ├──postman-struct/
+    │   ├──postman-jobs/
+    │   ├──sql-struct/
+    │   └──sql-data/
+    │
+    └──2-b2b/
+        ├──postman-struct/
+        ├──postman-jobs/
+        ├──sql-struct/
+        └──sql-data/
+```
+
+---
+
+# Merge Order
+
+## B2C
+
+```
+0-both
++
+1-b2c
+```
+
+## B2B
+
+```
+0-both
++
+2-b2b
+```
+
+The **0-both** folder is always processed first.
+
+---
+
+# Generated Release
+
+```
+target/releases/
+└──26.06.01/
+    ├──B2B/
+    │   ├──0-postman-struct/
+    │   │      alpiq-postman-struct.json
+    │   │
+    │   ├──1-sql-struct/
+    │   │      alpiq-struct.sql
+    │   │
+    │   ├──2-sql-data/
+    │   │      alpiq-data.sql
+    │   │
+    │   ├──3-alpiq-scripts/
+    │   │      alpiq-scripts.json
+    │   │
+    │   └──4-postman-jobs/
+    │          alpiq-postman-jobs.json
+    │
+    └──B2C/
+        ├──0-postman-struct/
+        ├──1-sql-struct/
+        ├──2-sql-data/
+        ├──3-alpiq-scripts/
+        └──4-postman-jobs/
+```
+
+---
+
+# SQL Merge
+
+Every SQL script is merged into a single file.
+
+Each original file name is preserved as a comment.
+
+Example:
+
+```sql
+/******************************************************************************
+ * File : 001_create_customer.sql
+ ******************************************************************************/
+
+CREATE TABLE CUSTOMER (...);
+
+/******************************************************************************
+ * File : 002_add_contract.sql
+ ******************************************************************************/
+
+ALTER TABLE CONTRACT (...);
+```
+
+---
+
+# Recommended Workflow
+
+## 1 - Compile
+
+```
+mvn clean install
+```
+
+---
+
+## 2 - Generate Postman scripts
+
+```
+mvn alpiq:create-postman \
+    -DmodifiedLastDays=30 \
+    -DwithLocalScript=true
+```
+
+Generates:
+
+```
+target/generated-postman/
+└── alpiq-scripts/
+    └── alpiq-scripts.json
+```
+
+---
+
+## 3 - Prepare Release Notes
+
+```
+release-notes/
+└──26.06.01/
+    ├──0-both/
+    ├──1-b2c/
+    └──2-b2b/
+```
+
+---
+
+## 4 - Build Release
+
+```
+mvn alpiq:build-release \
+    -DreleaseVersion=26.06.01
+```
+
+---
+
+# Execution Summary
+
+At the end of the execution, the plugin displays a summary similar to:
+
+```
+=========================================================
+            ALPIQ RELEASE MAVEN PLUGIN
+=========================================================
+
+Create Postman
+
+Git filter        : 30 days
+Local scripts     : enabled
+
+Java files found  : 18
+REST scripts      : 12
+
+Generated
+
+target/generated-postman/alpiq-scripts/alpiq-scripts.json
+
+---------------------------------------------------------
+
+Build Release
+
+Release Version : 26.06.01
+
+Building B2B
+
+ ✔ Merge 0-both/postman-struct
+ ✔ Merge 2-b2b/postman-struct
+
+ ✔ Merge 0-both/sql-struct
+ ✔ Merge 2-b2b/sql-struct
+
+ ✔ Merge 0-both/sql-data
+ ✔ Merge 2-b2b/sql-data
+
+ ✔ Copy alpiq-scripts.json
+
+ ✔ Merge 0-both/postman-jobs
+ ✔ Merge 2-b2b/postman-jobs
+
+Building B2C
+
+ ✔ Merge 0-both/postman-struct
+ ✔ Merge 1-b2c/postman-struct
+
+ ✔ Merge 0-both/sql-struct
+ ✔ Merge 1-b2c/sql-struct
+
+ ✔ Merge 0-both/sql-data
+ ✔ Merge 1-b2c/sql-data
+
+ ✔ Copy alpiq-scripts.json
+
+ ✔ Merge 0-both/postman-jobs
+ ✔ Merge 1-b2c/postman-jobs
+
+=========================================================
+
+Release successfully generated
+
+Output:
+
+target/releases/26.06.01
+
+=========================================================
+```
+
+---
+
+# Future Improvements
+
+- Release validation goal
+- SQL numbering validation
+- Duplicate Postman detection
+- ZIP packaging
+- Release report generation
+- Release changelog generation
