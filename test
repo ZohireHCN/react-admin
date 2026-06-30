@@ -1,5 +1,4 @@
-Suite aux deux dernières MEP, je propose deux petites améliorations pour les prochaines releases :
-	•	Ajouter un dossier postman-struct pour regrouper toutes les collections Postman liées aux APIs techniques OpenCell (création/modification des Custom Tables, Custom Fields, etc.).
-	•	Privilégier systématiquement les APIs standard OpenCell pour créer ou modifier les Custom Tables et Custom Fields, plutôt que des scripts SQL.
-
-L’objectif est d’avoir des releases plus propres, plus cohérentes et plus faciles à maintenir.
+Suite aux deux dernières MEP, je propose quelques améliorations pour les prochaines releases :
+	•	Ajout d’un dossier postman-struct pour regrouper les collections Postman liées aux APIs techniques OpenCell (Custom Tables, Custom Fields, etc.).
+	•	Utiliser systématiquement les APIs standard OpenCell pour créer ou modifier les Custom Tables et Custom Fields.
+	•	Un template de release sera également ajouté afin de standardiser la structure des prochaines versions.
