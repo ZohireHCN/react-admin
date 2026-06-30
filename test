@@ -1,1 +1,28 @@
 
+Oui, lastModified() n’est pas fiable. Il faut l’éviter totalement.
+
+Pour ton besoin, garde uniquement Git :
+
+mvn alpiq:create-postman -DmodifiedLastDays=20
+
+Mais derrière le code doit faire :
+
+git diff --name-only HEAD@{20.days.ago} HEAD -- <inputDir>
+
+pas :
+
+file.lastModified()
+
+Et si HEAD@{20.days.ago} ne marche pas bien sur ton poste/CI, utilise plutôt :
+
+git log --since="20 days ago" --name-only --pretty=format: -- <inputDir>
+
+avec dédoublonnage obligatoire.
+
+Le plus robuste pour toi serait :
+
+git log --since="<X> days ago" --name-only --pretty=format: --diff-filter=AM -- <inputDir>
+
+puis LinkedHashMap pour enlever les doublons.
+
+Conclusion : supprime toute logique lastModified, garde modifiedLastDays, mais basé sur git log --since, pas sur les dates fichier.
