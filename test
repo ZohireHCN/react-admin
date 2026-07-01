@@ -1,4 +1,79 @@
-Oui. Crée cette structure :
+Voici le guide complet pour commencer ton app Flutter avec VS Code.
+
+1. Installer VS Code
+
+Télécharge et installe Visual Studio Code depuis le site officiel.
+
+2. Installer l’extension Flutter
+
+Dans VS Code :
+	1.	Ouvre Extensions
+	2.	Cherche Flutter
+	3.	Installe Flutter
+	4.	L’extension Dart s’installe automatiquement avec Flutter  ￼
+
+3. Installer Flutter SDK avec VS Code
+
+Dans VS Code :
+	1.	Appuie sur Ctrl + Shift + P
+Sur Mac : Cmd + Shift + P
+	2.	Tape :
+
+Flutter
+
+	3.	Choisis Flutter: New Project
+	4.	Clique sur Download SDK
+	5.	Choisis un dossier, par exemple :
+
+Windows :
+
+C:\src\flutter
+
+Mac/Linux :
+
+~/development/flutter
+
+	6.	Clique sur Clone Flutter
+	7.	Accepte Add SDK to PATH
+	8.	Ferme et rouvre VS Code  ￼
+
+4. Vérifier l’installation
+
+Dans VS Code :
+
+flutter doctor -v
+
+Tu dois corriger les erreurs affichées si Flutter indique qu’il manque Android Studio, Chrome, ou Android SDK.
+
+5. Créer le projet
+
+Dans le terminal :
+
+flutter create energie_app
+cd energie_app
+code .
+
+Ou depuis VS Code :
+	1.	Ctrl + Shift + P
+	2.	Flutter: New Project
+	3.	Application
+	4.	Nom du projet :
+
+energie_app
+
+6. Lancer l’application
+
+Pour lancer sur navigateur Chrome :
+
+flutter run -d chrome
+
+Ou dans VS Code :
+	1.	Choisis Chrome comme device
+	2.	Appuie sur F5  ￼
+
+7. Créer notre structure
+
+Dans lib/, crée :
 
 lib/
   main.dart
@@ -8,176 +83,4 @@ lib/
   widgets/
     energy_card.dart
 
-lib/main.dart
-
-import 'package:flutter/material.dart';
-import 'screens/login_screen.dart';
-
-void main() {
-  runApp(const EnergieApp());
-}
-
-class EnergieApp extends StatelessWidget {
-  const EnergieApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Energie App',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
-        useMaterial3: true,
-      ),
-      home: const LoginScreen(),
-    );
-  }
-}
-
-lib/screens/login_screen.dart
-
-import 'package:flutter/material.dart';
-import 'dashboard_screen.dart';
-
-class LoginScreen extends StatelessWidget {
-  const LoginScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final emailController = TextEditingController();
-    final passwordController = TextEditingController();
-
-    return Scaffold(
-      body: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Center(
-          child: SingleChildScrollView(
-            child: Column(
-              children: [
-                const Icon(Icons.bolt, size: 80, color: Colors.green),
-                const SizedBox(height: 16),
-                const Text(
-                  'Mon Énergie',
-                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 32),
-                TextField(
-                  controller: emailController,
-                  decoration: const InputDecoration(
-                    labelText: 'Email',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.email),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: passwordController,
-                  obscureText: true,
-                  decoration: const InputDecoration(
-                    labelText: 'Mot de passe',
-                    border: OutlineInputBorder(),
-                    prefixIcon: Icon(Icons.lock),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    onPressed: () {
-                      Navigator.pushReplacement(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const DashboardScreen(),
-                        ),
-                      );
-                    },
-                    child: const Text('Se connecter'),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-lib/screens/dashboard_screen.dart
-
-import 'package:flutter/material.dart';
-import '../widgets/energy_card.dart';
-
-class DashboardScreen extends StatelessWidget {
-  const DashboardScreen({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Tableau de bord'),
-      ),
-      body: const Padding(
-        padding: EdgeInsets.all(16),
-        child: Column(
-          children: [
-            EnergyCard(
-              title: 'Consommation ce mois',
-              value: '245 kWh',
-              icon: Icons.bolt,
-            ),
-            EnergyCard(
-              title: 'Dernière facture',
-              value: '78,50 €',
-              icon: Icons.receipt_long,
-            ),
-            EnergyCard(
-              title: 'Relevé compteur',
-              value: 'À envoyer',
-              icon: Icons.speed,
-            ),
-            EnergyCard(
-              title: 'Assistance',
-              value: 'Contacter le support',
-              icon: Icons.support_agent,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-lib/widgets/energy_card.dart
-
-import 'package:flutter/material.dart';
-
-class EnergyCard extends StatelessWidget {
-  final String title;
-  final String value;
-  final IconData icon;
-
-  const EnergyCard({
-    super.key,
-    required this.title,
-    required this.value,
-    required this.icon,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.only(bottom: 12),
-      child: ListTile(
-        leading: Icon(icon, color: Colors.green),
-        title: Text(title),
-        subtitle: Text(value),
-        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-      ),
-    );
-  }
-}
-
-Puis lance :
-
-flutter run
+Ensuite on mettra le code de l’application dedans.
