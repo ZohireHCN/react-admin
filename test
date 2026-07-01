@@ -1,86 +1,356 @@
-Voici le guide complet pour commencer ton app Flutter avec VS Code.
-
-1. Installer VS Code
-
-Télécharge et installe Visual Studio Code depuis le site officiel.
-
-2. Installer l’extension Flutter
-
-Dans VS Code :
-	1.	Ouvre Extensions
-	2.	Cherche Flutter
-	3.	Installe Flutter
-	4.	L’extension Dart s’installe automatiquement avec Flutter  ￼
-
-3. Installer Flutter SDK avec VS Code
-
-Dans VS Code :
-	1.	Appuie sur Ctrl + Shift + P
-Sur Mac : Cmd + Shift + P
-	2.	Tape :
-
-Flutter
-
-	3.	Choisis Flutter: New Project
-	4.	Clique sur Download SDK
-	5.	Choisis un dossier, par exemple :
-
-Windows :
-
-C:\src\flutter
-
-Mac/Linux :
-
-~/development/flutter
-
-	6.	Clique sur Clone Flutter
-	7.	Accepte Add SDK to PATH
-	8.	Ferme et rouvre VS Code  ￼
-
-4. Vérifier l’installation
-
-Dans VS Code :
-
-flutter doctor -v
-
-Tu dois corriger les erreurs affichées si Flutter indique qu’il manque Android Studio, Chrome, ou Android SDK.
-
-5. Créer le projet
-
-Dans le terminal :
-
-flutter create energie_app
-cd energie_app
-code .
-
-Ou depuis VS Code :
-	1.	Ctrl + Shift + P
-	2.	Flutter: New Project
-	3.	Application
-	4.	Nom du projet :
-
-energie_app
-
-6. Lancer l’application
-
-Pour lancer sur navigateur Chrome :
-
-flutter run -d chrome
-
-Ou dans VS Code :
-	1.	Choisis Chrome comme device
-	2.	Appuie sur F5  ￼
-
-7. Créer notre structure
-
-Dans lib/, crée :
+Parfait. Crée ces fichiers dans lib/.
 
 lib/
   main.dart
   screens/
     login_screen.dart
     dashboard_screen.dart
+    invoices_screen.dart
+    consumption_screen.dart
+    meter_reading_screen.dart
+    support_screen.dart
   widgets/
     energy_card.dart
 
-Ensuite on mettra le code de l’application dedans.
+lib/main.dart
+
+import 'package:flutter/material.dart';
+import 'screens/login_screen.dart';
+
+void main() {
+  runApp(const EnergieApp());
+}
+
+class EnergieApp extends StatelessWidget {
+  const EnergieApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Energie App',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
+        useMaterial3: true,
+      ),
+      home: const LoginScreen(),
+    );
+  }
+}
+
+lib/widgets/energy_card.dart
+
+import 'package:flutter/material.dart';
+
+class EnergyCard extends StatelessWidget {
+  final String title;
+  final String value;
+  final IconData icon;
+  final VoidCallback? onTap;
+
+  const EnergyCard({
+    super.key,
+    required this.title,
+    required this.value,
+    required this.icon,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: ListTile(
+        onTap: onTap,
+        leading: Icon(icon, color: Colors.green),
+        title: Text(title),
+        subtitle: Text(value),
+        trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+      ),
+    );
+  }
+}
+
+lib/screens/login_screen.dart
+
+import 'package:flutter/material.dart';
+import 'dashboard_screen.dart';
+
+class LoginScreen extends StatelessWidget {
+  const LoginScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final emailController = TextEditingController();
+    final passwordController = TextEditingController();
+
+    return Scaffold(
+      body: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: SingleChildScrollView(
+            child: Column(
+              children: [
+                const Icon(Icons.bolt, size: 80, color: Colors.green),
+                const SizedBox(height: 16),
+                const Text(
+                  'Mon Énergie',
+                  style: TextStyle(fontSize: 28, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 32),
+                TextField(
+                  controller: emailController,
+                  decoration: const InputDecoration(
+                    labelText: 'Email',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.email),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: passwordController,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Mot de passe',
+                    border: OutlineInputBorder(),
+                    prefixIcon: Icon(Icons.lock),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () {
+                      Navigator.pushReplacement(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const DashboardScreen(),
+                        ),
+                      );
+                    },
+                    child: const Text('Se connecter'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+lib/screens/dashboard_screen.dart
+
+import 'package:flutter/material.dart';
+import '../widgets/energy_card.dart';
+import 'consumption_screen.dart';
+import 'invoices_screen.dart';
+import 'meter_reading_screen.dart';
+import 'support_screen.dart';
+
+class DashboardScreen extends StatelessWidget {
+  const DashboardScreen({super.key});
+
+  void _goTo(BuildContext context, Widget screen) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => screen),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Tableau de bord'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            EnergyCard(
+              title: 'Consommation',
+              value: 'Voir ma consommation',
+              icon: Icons.bolt,
+              onTap: () => _goTo(context, const ConsumptionScreen()),
+            ),
+            EnergyCard(
+              title: 'Factures',
+              value: 'Voir mes factures',
+              icon: Icons.receipt_long,
+              onTap: () => _goTo(context, const InvoicesScreen()),
+            ),
+            EnergyCard(
+              title: 'Relevé compteur',
+              value: 'Envoyer mon relevé',
+              icon: Icons.speed,
+              onTap: () => _goTo(context, const MeterReadingScreen()),
+            ),
+            EnergyCard(
+              title: 'Assistance',
+              value: 'Contacter le support',
+              icon: Icons.support_agent,
+              onTap: () => _goTo(context, const SupportScreen()),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+lib/screens/consumption_screen.dart
+
+import 'package:flutter/material.dart';
+
+class ConsumptionScreen extends StatelessWidget {
+  const ConsumptionScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Consommation')),
+      body: const Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Consommation ce mois', style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold)),
+            SizedBox(height: 16),
+            Card(
+              child: ListTile(
+                leading: Icon(Icons.bolt, color: Colors.green),
+                title: Text('245 kWh'),
+                subtitle: Text('Estimation du mois en cours'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+lib/screens/invoices_screen.dart
+
+import 'package:flutter/material.dart';
+
+class InvoicesScreen extends StatelessWidget {
+  const InvoicesScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final invoices = [
+      {'month': 'Juin 2026', 'amount': '78,50 €', 'status': 'Payée'},
+      {'month': 'Mai 2026', 'amount': '82,10 €', 'status': 'Payée'},
+      {'month': 'Avril 2026', 'amount': '75,30 €', 'status': 'Payée'},
+    ];
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Factures')),
+      body: ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: invoices.length,
+        itemBuilder: (context, index) {
+          final invoice = invoices[index];
+
+          return Card(
+            child: ListTile(
+              leading: const Icon(Icons.receipt_long, color: Colors.green),
+              title: Text(invoice['month']!),
+              subtitle: Text(invoice['status']!),
+              trailing: Text(invoice['amount']!),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+lib/screens/meter_reading_screen.dart
+
+import 'package:flutter/material.dart';
+
+class MeterReadingScreen extends StatelessWidget {
+  const MeterReadingScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final meterController = TextEditingController();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Relevé compteur')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+              controller: meterController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: 'Index compteur',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.speed),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () {},
+                child: const Text('Envoyer le relevé'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+lib/screens/support_screen.dart
+
+import 'package:flutter/material.dart';
+
+class SupportScreen extends StatelessWidget {
+  const SupportScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final messageController = TextEditingController();
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Assistance')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          children: [
+            TextField(
+              controller: messageController,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                labelText: 'Votre message',
+                border: OutlineInputBorder(),
+                prefixIcon: Icon(Icons.message),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () {},
+                child: const Text('Envoyer au support'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+Lance :
+
+flutter run -d chrome
